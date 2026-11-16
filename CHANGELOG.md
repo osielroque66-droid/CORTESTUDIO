@@ -9,6 +9,9 @@ Cambios de este proyecto sobre Concat 0.2.11 (`a7cda105`).
 - **Tiempos por palabra en la transcripción.** Whisper corre con marcas de
   tiempo por token; `concat-speech/src/words.rs` las une en palabras
   (acentos, "ñ" y signos incluidos). `Segment.words`.
+- **Alineación DTW de whisper.cpp** para los tiempos por palabra (cabezas
+  de atención propias de cada modelo). Medido con audio en español: error
+  medio de inicio de palabra 0.11 s, contra 0.25 s de la heurística.
 - **Subtítulos que resaltan la palabra que se pronuncia.**
   `TextStyle.karaoke` (`concat-project/src/karaoke.rs`): un tiempo por
   palabra, modo *palabra activa* o *relleno karaoke*, y el estilo de la

@@ -444,6 +444,22 @@ fn whisper_gpu() -> Result<String, String> {
         .clone()
 }
 
+/// The alignment heads whisper.cpp knows for model `id`: the attention
+/// heads of that model that follow the sound as the words are written,
+/// which is what its token times are warped along.
+fn alignment_heads(id: &str) -> Option<whisper_rs::DtwModelPreset> {
+    use whisper_rs::DtwModelPreset as Preset;
+    Some(match id {
+        "tiny.en" => Preset::TinyEn,
+        "tiny" => Preset::Tiny,
+        "base.en" => Preset::BaseEn,
+        "base" => Preset::Base,
+        "small.en" => Preset::SmallEn,
+        "small" => Preset::Small,
+        _ => return None,
+    })
+}
+
 fn model_file(dirs: &AppDirs, id: &str) -> Result<PathBuf, String> {
     // Ids come from our own table; anything else is a bug, not input.
     known(id).ok_or_else(|| format!("unknown model {id:?}"))?;
@@ -1172,6 +1188,21 @@ impl Transcriber {
             cpu_backend()?;
             let mut context_params = WhisperContextParameters::default();
             context_params.use_gpu(gpu);
+            // Each token timed by where the decoder was listening when it
+            // wrote it (dynamic time warping over the model's alignment
+            // heads), which places a word within a few hundredths of a
+            // second; whisper's other token times, worked out from the
+            // timestamp probabilities, were a quarter of a second off on
+            // average in the measurement (`captions_of_a_file` over speech
+            // with known word times) and half a second at worst. The heads
+            // are the model's own, so a model with no preset keeps the
+            // other times.
+            if let Some(model_preset) = alignment_heads(&request.model_id) {
+                context_params.dtw_parameters(whisper_rs::DtwParameters {
+                    mode: whisper_rs::DtwMode::ModelPreset { model_preset },
+                    ..whisper_rs::DtwParameters::default()
+                });
+            }
             let context = WhisperContext::new_with_params(&model_path, context_params)
                 .map_err(|error| format!("could not load the model: {error}"))?;
             *loaded = Some(LoadedModel {
@@ -1313,18 +1344,47 @@ impl Transcriber {
             }
             // The line's tokens as words, on the sound's own clock like
             // the line, and held inside it.
-            let pieces: Vec<crate::words::Piece> = (0..segment.n_tokens())
+            let tokens: Vec<(Vec<u8>, whisper_rs::WhisperTokenData)> = (0..segment.n_tokens())
                 .filter_map(|index| segment.get_token(index))
                 .filter_map(|token| {
                     let data = token.token_data();
                     // Timestamps and the other special tokens sit past
                     // end-of-text.
                     (data.id < eot).then_some(())?;
-                    Some(crate::words::Piece {
-                        bytes: token.to_bytes().ok()?.to_vec(),
-                        start: reel.to_source(data.t0 as f64 / 100.0),
-                        end: reel.to_source(data.t1 as f64 / 100.0),
-                    })
+                    Some((token.to_bytes().ok()?.to_vec(), data))
+                })
+                .collect();
+            // The warped times say where each token ends, in what whisper
+            // heard: a token then begins where the one before it ended,
+            // the first where the line does. They are taken when every
+            // token has one and they run forwards; otherwise whisper's
+            // own guesses stand.
+            let ends: Vec<f64> = tokens
+                .iter()
+                .map(|(_, data)| data.t_dtw as f64 / 100.0)
+                .collect();
+            let begun = segment.start_timestamp() as f64 / 100.0;
+            let warped = !ends.is_empty()
+                && ends[0] >= begun
+                && ends.windows(2).all(|pair| pair[1] >= pair[0]);
+            let pieces: Vec<crate::words::Piece> = tokens
+                .into_iter()
+                .enumerate()
+                .map(|(index, (bytes, data))| {
+                    let (from, until) = if warped {
+                        let before = if index == 0 { begun } else { ends[index - 1] };
+                        // A hair past where the last token ended, so a
+                        // token after a silence that was cut out begins
+                        // on the far side of it and not the near.
+                        ((before + 0.02).min(ends[index]), ends[index])
+                    } else {
+                        (data.t0 as f64 / 100.0, data.t1 as f64 / 100.0)
+                    };
+                    crate::words::Piece {
+                        bytes,
+                        start: reel.to_source(from),
+                        end: reel.to_source(until),
+                    }
                 })
                 .collect();
             let words = crate::words::held_within(crate::words::words(&pieces), start, end);
@@ -1601,6 +1661,11 @@ mod tests {
                 "{:7.2} {:7.2}  {}",
                 segment.start, segment.end, segment.text
             );
+            // Each word with when it was said, for checking a caption's
+            // lit word against the speech.
+            for word in &segment.words {
+                println!("        {:7.2} {:7.2}  {}", word.start, word.end, word.text);
+            }
         }
     }
 

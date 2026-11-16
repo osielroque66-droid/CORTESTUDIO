@@ -64,7 +64,7 @@ completar el español. Pendiente menor: renombrar pistas.
 ## Fase 2 — Subtítulos (en curso)
 
 Hecho (2a):
-- Tiempos por palabra desde Whisper.
+- Tiempos por palabra desde Whisper con alineación DTW (error medio medido: 0.11 s).
 - Modelo `Karaoke` en el título; resaltado "palabra activa" y "relleno
   karaoke" en vista previa y exportación; sobrevive a dividir, recortar,
   guardar y reabrir.
@@ -73,15 +73,13 @@ Hecho (2a):
 - Exportación SRT / VTT / ASS / TXT.
 
 Siguiente (2b):
-1. Verificar con audio real en español y un modelo descargado (requiere tu
-   autorización para bajar el modelo; ver TESTING.md).
+1. Probar con voz humana real en español de México y música de fondo.
 2. Panel de transcripción: lista de segmentos y palabras, clic para saltar,
    corregir texto, dividir/combinar segmentos, editar tiempos por palabra.
 3. Controles de resaltado en el inspector del clip (color libre, negritas,
    escala de la palabra activa) y guardarlos en plantillas.
 4. Animaciones por palabra (aparecer/rebote) y modo "revelar".
 5. Generar subtítulos solo de una región seleccionada.
-6. Evaluar alineación DTW de whisper.cpp para tiempos más finos.
 
 ## Fase 3 — Edición avanzada (mayormente cubierta por Concat)
 

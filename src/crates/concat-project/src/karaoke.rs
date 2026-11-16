@@ -34,17 +34,24 @@ use crate::model::{RunStyle, TextRun, TextStyle};
 
 /// When one word is said, in seconds on the clip's source clock.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(description = "When a word is said."))]
 #[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WordTime {
     /// Where the word begins.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(description = "Seconds from clip origin.")
+    )]
     pub at: f64,
     /// Where it ends; never before `at`.
+    #[cfg_attr(feature = "schema", schemars(description = "Seconds."))]
     pub until: f64,
 }
 
 /// How the spoken look moves through the words.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(description = "How the look moves."))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum KaraokeMode {
@@ -58,17 +65,36 @@ pub enum KaraokeMode {
 
 /// A title's words in time. See the module docs.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(description = "A title's words in time."))]
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Karaoke {
     /// One time per word of the title's content, in the words' order.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(description = "One per word of content, in order.")
+    )]
     pub words: Vec<WordTime>,
     /// How the look moves through the words.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(description = "active: spoken word; fill: all said so far.")
+    )]
     pub mode: KaraokeMode,
     /// The look of a spoken word, over the title's own and over any run
     /// the word already has. Empty changes nothing on screen: the times
     /// are then only kept, for an export of subtitles or a look given
     /// later.
+    // The same overrides a run has; named, not spelled out again, in a
+    // schema that sits in an agent's context once per tool that takes a
+    // title's style.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(
+            with = "serde_json::Value",
+            description = "The spoken word look: a run's fields (color, fontWeight, fontScale...)."
+        )
+    )]
     pub style: RunStyle,
 }
 

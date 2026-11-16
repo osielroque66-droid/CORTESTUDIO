@@ -2471,6 +2471,10 @@ pub struct TextStyle {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "wire::karaoke"
     )]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(description = "Word timings and spoken-word look.")
+    )]
     pub karaoke: Option<crate::karaoke::Karaoke>,
 }
 

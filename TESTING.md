@@ -74,17 +74,44 @@ audio externos.
 | `concat-speech/src/words.rs` (7) | Tokens → palabras; "ñ" partida en dos tokens se reconstruye; puntuación suelta; tiempos monótonos |
 | `concat-host/tests/export.rs` › `a_karaoke_caption_lights_each_word_as_it_is_said` | **Extremo a extremo:** exporta un MP4, lo decodifica y cuenta pixeles: la palabra correcta está en rojo en el segundo correcto; igual tras dividir el clip, en modo relleno, y tras guardar y reabrir |
 
+## Estado tras la etapa 1
+
+| Suite | Resultado |
+|---|---|
+| Motor (16 crates), código modificado | 1 250 pasan · 0 fallan · 18 ignoradas |
+| `cargo check -p concat` (ventana + Slint) | sin errores |
+| `scripts/locales.py --check` | sin faltantes |
+
+## Medición con audio real en español
+
+Modelo `small` (488 MB, SHA-256 verificado, del espejo de Concat). Audio de
+26 s en español latino sintetizado palabra por palabra (espeak-ng), de modo
+que el inicio y fin reales de cada una de las 38 palabras se conocen.
+
+| | Palabras correctas | Error medio de inicio | Mediana | Peor caso |
+|---|---|---|---|---|
+| Tiempos por token de Whisper (heurística) | 38 / 38 | 0.25 s | 0.23 s | 0.68 s |
+| **Alineación DTW (lo que quedó activo)** | 38 / 38 | **0.11 s** | 0.09 s | 0.44 s |
+
+Con DTW la palabra se ilumina en promedio una décima de segundo antes de
+sonar, que es lo que el ojo prefiere. También probado: audio de solo ruido
+(no inventa subtítulos, no se cae) y audio de más de 60 s (varias ventanas
+de Whisper). Transcribir 26 s tomó ~13 s en 4 núcleos de CPU.
+
+Límites de esta medición: voz sintética, no una persona; un solo modelo.
+Whisper escribió "Están listos." donde se dijo "¿Están listos?".
+
+Para repetirla con un archivo propio:
+
+```bash
+CONCAT_CAPTION_FILE=voz.wav CONCAT_CAPTION_MODEL=small CONCAT_CAPTION_LANGUAGE=es cargo test --release -p concat-speech -- --ignored --nocapture captions_of_a_file
+```
+
 ## Lo que todavía NO está verificado
 
-- Transcripción real de audio en español con los tiempos por palabra
-  (necesita un modelo Whisper; no se descargó ninguno sin autorización).
-  Cuando haya modelo:
-
-  ```bash
-  CONCAT_CAPTION_FILE=voz.wav CONCAT_CAPTION_MODEL=small cargo test -p concat-speech -- --ignored --nocapture
-  ```
-
-- La interfaz nueva del panel de subtítulos operada a mano en una ventana.
+- El panel de subtítulos nuevo operado a mano en una ventana (compila y su
+  lógica está probada; nadie le ha dado clic todavía).
+- Voz humana real en español de México, con música de fondo.
 - Compilación y ejecución en Windows.
 
 ## Flujo de aceptación manual (sección 24 del encargo)
