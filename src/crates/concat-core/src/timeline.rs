@@ -115,6 +115,15 @@ pub struct Clip {
     /// one is drawn at one of its pixels to one of the frame's, centred on
     /// the clip's centre, where any other is fitted inside the frame.
     pub overscan: f64,
+    /// The longer clip this one is a stretch of, as its start and its
+    /// duration; None for a clip that is whole, which is nearly every one.
+    /// A title that lights its words as they are said is drawn as one
+    /// picture per word, each a clip of its own for as long as the word
+    /// lasts, and everything the title does over its length - its keys,
+    /// its masks' keys, its entrance and exit, its effects' rides - is
+    /// measured along the title, not along the word: see
+    /// [`Clip::fraction_at`] and [`Clip::pose_at`].
+    pub part_of: Option<(Rational, Rational)>,
 }
 
 /// How a layer's colour meets what is beneath it.
@@ -240,17 +249,25 @@ impl Clip {
             hold: false,
             masks: Vec::new(),
             overscan: 1.0,
+            part_of: None,
         }
     }
 
-    /// Where in the clip `time` falls, `0..=1`; zero outside it.
+    /// The start and duration everything keyed over the clip's length is
+    /// measured along: its own, or those of the longer clip it is a
+    /// stretch of (see [`Clip::part_of`]).
+    pub fn whole(&self) -> (Rational, Rational) {
+        self.part_of.unwrap_or((self.start, self.duration))
+    }
+
+    /// Where in the clip `time` falls, `0..=1`; zero outside it. For a
+    /// stretch of a longer clip, where in the longer one.
     pub fn fraction_at(&self, time: Rational) -> f64 {
-        if self.duration.is_zero() {
+        let (start, duration) = self.whole();
+        if duration.is_zero() {
             return 0.0;
         }
-        ((time - self.start) / self.duration)
-            .as_f64()
-            .clamp(0.0, 1.0)
+        ((time - start) / duration).as_f64().clamp(0.0, 1.0)
     }
 
     /// The placement at `time`: the clip's own, moved by its animation.
@@ -275,8 +292,9 @@ impl Clip {
     /// Where the clip's moves have it at `time`; None for a clip with none.
     pub fn pose_at(&self, time: Rational) -> Option<Pose> {
         let motion = self.motion.as_ref().filter(|motion| !motion.is_empty())?;
-        let local = (time - self.start).as_f64();
-        Some(motion.pose_at(local, self.duration.as_f64()))
+        let (start, duration) = self.whole();
+        let local = (time - start).as_f64();
+        Some(motion.pose_at(local, duration.as_f64()))
     }
 
     /// The masks at `time`, top first: each one's keyed numbers at their

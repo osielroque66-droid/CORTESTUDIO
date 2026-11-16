@@ -341,6 +341,17 @@ pub(crate) fn build_timeline(
         engine_clip.blend = concat_core::timeline::Blend::parse(&clip.blend);
         engine_clip.masks = clip.masks.iter().map(Mask::engine).collect();
         engine_clip.overscan = overscan_of(clip);
+        // Both ends on the grid, as the clip's own are, so the first
+        // stretch of a title starts where the title does.
+        engine_clip.part_of = clip.part_of.map(|(whole_start, whole_duration)| {
+            let from = quantise_at(whole_start, rate, request.effect_time_offset);
+            let until = quantise_at(
+                whole_start + whole_duration,
+                rate,
+                request.effect_time_offset,
+            );
+            (from, until - from)
+        });
         engine_clip.transform = Transform {
             scale: clip.scale,
             offset_x: clip.offset_x,

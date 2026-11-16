@@ -20,7 +20,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use concat_project::Command;
-use concat_project::model::{ClipKind, TextStyle};
+use concat_project::captions::{self, AssLook, Caption, Grouping, Spoken, SpokenWord};
+use concat_project::commands::ClipPatch;
+use concat_project::karaoke::{self, Karaoke, KaraokeMode, WordTime};
+use concat_project::model::{ClipKind, RunStyle, TextStyle};
 use concat_project::srt;
 use concat_speech::JobStage;
 use concat_speech::transcribe::Segment;
@@ -41,6 +44,36 @@ const CAPTION_SIZES: [f64; 3] = [0.04, 0.05, 0.065];
 /// A rough speaking rate, for a script's timing and the speech sheet's
 /// estimate.
 pub const CHARS_PER_SECOND: f32 = 14.0;
+
+/// How a voice's words are cut into captions, by the sheet's row.
+const GROUPINGS: [Grouping; 5] = [
+    Grouping::Phrase,
+    Grouping::Word,
+    Grouping::Pair,
+    Grouping::Burst,
+    Grouping::Sentence,
+];
+/// The colours the word being said can take, by the sheet's row: the
+/// loud ones a reel's captions wear, each legible over footage on the
+/// outline or shadow a caption has.
+const HIGHLIGHTS: [&str; 7] = [
+    "#ffe600", "#39ff14", "#00e5ff", "#ff3d9a", "#ff8a00", "#ff3b30", "#ffffff",
+];
+/// The formats captions are written out in, by the sheet's row: the
+/// extension, and the media type a phone files it under.
+const FORMATS: [(&str, &str); 4] = [
+    ("srt", "application/x-subrip"),
+    ("vtt", "text/vtt"),
+    ("ass", "text/x-ssa"),
+    ("txt", "text/plain"),
+];
+
+/// Which of the sheet's remembered choices a row was picked in; see
+/// [`CaptionsMsg::ChoiceChanged`].
+const CHOICE_GROUPING: i32 = 0;
+const CHOICE_HIGHLIGHT: i32 = 1;
+const CHOICE_COLOUR: i32 = 2;
+const CHOICE_FORMAT: i32 = 3;
 
 /// Everything that can happen to the captions sheet.
 #[derive(Clone, Debug)]
@@ -65,6 +98,14 @@ pub enum CaptionsMsg {
     LanguageChanged(i32),
     PlacementChanged(i32),
     SizeChanged(i32),
+    /// A row picked in one of the choices the sheet remembers between
+    /// runs: which choice (0 how the words are cut into captions, 1 how
+    /// the word being said is lit, 2 its colour, 3 the format captions
+    /// are written out in), and the row.
+    ChoiceChanged(i32, i32),
+    /// Gives the captions already on the timeline the sheet's way of
+    /// lighting the word being said.
+    ApplyHighlight,
     /// Run the pass the sheet describes.
     Begin,
     Cancel,
@@ -218,6 +259,19 @@ impl CaptionsPane {
                 self.placement = (index.max(0) as usize).min(2);
             }
             CaptionsMsg::SizeChanged(index) => self.size = (index.max(0) as usize).min(2),
+            CaptionsMsg::ChoiceChanged(which, index) => {
+                let row = index.max(0) as usize;
+                let prefs = &mut studio.prefs;
+                match which {
+                    CHOICE_GROUPING => prefs.caption_grouping = row.min(GROUPINGS.len() - 1),
+                    CHOICE_HIGHLIGHT => prefs.caption_highlight = row.min(2),
+                    CHOICE_COLOUR => prefs.caption_highlight_colour = row.min(HIGHLIGHTS.len() - 1),
+                    CHOICE_FORMAT => prefs.caption_format = row.min(FORMATS.len() - 1),
+                    _ => return,
+                }
+                studio.prefs.save(&studio.host.dirs);
+            }
+            CaptionsMsg::ApplyHighlight => self.apply_highlight(studio),
             CaptionsMsg::Begin => {
                 if self.from_voice {
                     self.run_sound(studio);
@@ -245,19 +299,42 @@ impl CaptionsPane {
                         };
                         let look = subject.look;
                         let (base, font) = caption_base(studio);
-                        let commands: Vec<Command> = segments
+                        let lit = lit_look(&studio.prefs);
+                        // The words as they were heard, on the timeline's
+                        // clock: the clip's start, and its speed taken
+                        // out. Cut into captions the way the sheet says,
+                        // each keeping its words' own times.
+                        let on_timeline = |seconds: f64| subject.start + seconds / subject.speed;
+                        let spoken: Vec<Spoken> = segments
                             .into_iter()
-                            .filter_map(|segment| {
-                                let text = segment.text.trim().to_owned();
-                                (!text.is_empty()).then(|| {
-                                    caption_clip(
-                                        text,
-                                        subject.start + segment.start / subject.speed,
-                                        ((segment.end - segment.start) / subject.speed).max(0.2),
-                                        look,
-                                        base.as_ref(),
-                                    )
-                                })
+                            .filter(|segment| !segment.text.trim().is_empty())
+                            .map(|segment| Spoken {
+                                start: on_timeline(segment.start),
+                                end: on_timeline(segment.end),
+                                text: segment.text.trim().to_owned(),
+                                words: segment
+                                    .words
+                                    .into_iter()
+                                    .map(|word| SpokenWord {
+                                        start: on_timeline(word.start),
+                                        end: on_timeline(word.end),
+                                        text: word.text,
+                                    })
+                                    .collect(),
+                            })
+                            .collect();
+                        let grouping = GROUPINGS[studio.prefs.caption_grouping.min(4)];
+                        let commands: Vec<Command> = held_apart(captions::group(&spoken, grouping))
+                            .into_iter()
+                            .map(|caption| {
+                                caption_clip(
+                                    caption.text.clone(),
+                                    caption.start,
+                                    caption.end - caption.start,
+                                    look,
+                                    base.as_ref(),
+                                    Some(timed(caption.local_words(), lit.clone())),
+                                )
                             })
                             .collect();
                         let count = commands.len();
@@ -306,6 +383,54 @@ impl CaptionsPane {
         }
     }
 
+    /// Gives every caption on the captions' lane - the selected title's,
+    /// or the one with the most titles - the sheet's way of lighting the
+    /// word being said: its colour and how it moves, or none. A caption's
+    /// own word times are kept; one with none shares its span among its
+    /// words. One batch, one undo step.
+    fn apply_highlight(&mut self, studio: &mut Studio) {
+        let Some(lane) = export_lane(studio) else {
+            self.message = t("captions.noCaptionsToExport");
+            return;
+        };
+        let lit = lit_look(&studio.prefs);
+        let commands: Vec<Command> = studio
+            .timeline()
+            .clips
+            .iter()
+            .filter(|clip| clip.kind == ClipKind::Text && clip.track_id == lane.track_id)
+            .filter_map(|clip| {
+                let text = clip.text.as_ref()?;
+                let words = match text.karaoke.as_ref() {
+                    Some(kept) if !kept.words.is_empty() => kept.fitted(&text.content),
+                    // On the clip's source clock, as measured ones are.
+                    _ => spread_words(
+                        &text.content,
+                        clip.source_start,
+                        clip.source_start + clip.duration,
+                    ),
+                };
+                let style = TextStyle {
+                    karaoke: Some(timed(words, lit.clone())),
+                    ..text.clone()
+                };
+                (style != *text).then(|| Command::UpdateClip {
+                    clip_id: clip.id.clone(),
+                    patch: ClipPatch {
+                        text: Some(Some(style)),
+                        ..ClipPatch::default()
+                    },
+                })
+            })
+            .collect();
+        let count = commands.len();
+        if count > 0 {
+            studio.apply(Command::Batch { commands });
+        }
+        self.message.clear();
+        studio.notify(&tf("captions.highlightApplied", &[&count]), false);
+    }
+
     /// A SubRip file's cues as captions where the file times them, with
     /// the sheet's look: one batch, one undo step. A file that is not
     /// UTF-8 is read as best it can be.
@@ -328,7 +453,7 @@ impl CaptionsPane {
         };
         let look = self.look();
         let (base, font) = caption_base(studio);
-        let commands = srt_commands(cues, look, base.as_ref());
+        let commands = srt_commands(cues, look, base.as_ref(), lit_look(&studio.prefs));
         if commands.is_empty() {
             self.message = t("captions.noSubtitlesInFile");
             return;
@@ -355,7 +480,8 @@ impl CaptionsPane {
             self.message = t("captions.noCaptionsToExport");
             return;
         }
-        let name = format!("{}.srt", file_stem(studio));
+        let (extension, _) = FORMATS[studio.prefs.caption_format.min(FORMATS.len() - 1)];
+        let name = format!("{}.{extension}", file_stem(studio));
         // No project, no project folder: Documents, as anywhere else a
         // file is written with nothing better to offer.
         let folder = studio
@@ -368,24 +494,29 @@ impl CaptionsPane {
             self.export_srt(studio, &path);
             return;
         }
-        let title = t("captions.exportSrt");
-        let family = t("captions.subRipSubtitles");
+        let title = t("captions.exportSubtitles");
+        let family = match extension {
+            "srt" => t("captions.subRipSubtitles"),
+            "vtt" => t("captions.webVttSubtitles"),
+            "ass" => t("captions.assSubtitles"),
+            _ => t("captions.plainText"),
+        };
         crate::host::after_dialog(
             move || {
                 let chosen = crate::platform::save_file(
                     &title,
                     &folder,
                     &name,
-                    (family.as_str(), &["srt"]),
+                    (family.as_str(), &[extension]),
                 )?;
                 Some(
                     if chosen
                         .extension()
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("srt"))
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
                     {
                         chosen
                     } else {
-                        chosen.with_extension("srt")
+                        chosen.with_extension(extension)
                     },
                 )
             },
@@ -401,8 +532,24 @@ impl CaptionsPane {
             self.message = t("captions.noCaptionsToExport");
             return;
         };
-        let cues = srt::title_cues(studio.timeline(), Some(&lane.track_id));
-        if let Err(error) = std::fs::write(path, srt::write(&cues)) {
+        // The format is the file's own extension, so a name typed with
+        // another one is written as what it says it is.
+        let (extension, media_type) = FORMATS
+            .iter()
+            .copied()
+            .find(|(extension, _)| {
+                path.extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
+            })
+            .unwrap_or(FORMATS[0]);
+        let cues = captions::title_captions(studio.timeline(), Some(&lane.track_id));
+        let written = match extension {
+            "vtt" => captions::write_vtt(&cues),
+            "ass" => captions::write_ass(&cues, &ass_look(studio, &lane.track_id)),
+            "txt" => captions::write_txt(&cues),
+            _ => srt::write(&srt::title_cues(studio.timeline(), Some(&lane.track_id))),
+        };
+        if let Err(error) = std::fs::write(path, written) {
             log::warn!(
                 "captions: writing the subtitles to {} failed: {error}; nothing was exported",
                 crate::studio::file_name_of(&path.to_string_lossy())
@@ -434,7 +581,7 @@ impl CaptionsPane {
         let written = path.to_path_buf();
         let handed = crate::platform::publish_document(
             path.to_path_buf(),
-            "application/x-subrip",
+            media_type,
             move |result| {
                 crate::host::on_ui(move |studio, _, _| match result {
                     Ok(place) => say(studio, &place),
@@ -543,10 +690,19 @@ impl CaptionsPane {
         let look = self.look();
         let mut at = f64::from(studio.playhead);
         let (base, font) = caption_base(studio);
+        let lit = lit_look(&studio.prefs);
         let commands: Vec<Command> = lines
             .into_iter()
             .map(|(text, seconds)| {
-                let command = caption_clip(text, at, seconds, look, base.as_ref());
+                let words = spread_words(&text, 0.0, seconds);
+                let command = caption_clip(
+                    text,
+                    at,
+                    seconds,
+                    look,
+                    base.as_ref(),
+                    lit.clone().map(|lit| timed(words, Some(lit))),
+                );
                 at += seconds;
                 command
             })
@@ -699,6 +855,13 @@ impl CaptionsPane {
             language_fixed: english_only,
             placement: self.placement as i32,
             size: self.size as i32,
+            grouping: studio.prefs.caption_grouping.min(GROUPINGS.len() - 1) as i32,
+            highlight: studio.prefs.caption_highlight.min(2) as i32,
+            highlight_colour: studio
+                .prefs
+                .caption_highlight_colour
+                .min(HIGHLIGHTS.len() - 1) as i32,
+            format: studio.prefs.caption_format.min(FORMATS.len() - 1) as i32,
             running: self.running,
             progress: self.pace.floor,
             ceiling: self.pace.ceiling,
@@ -743,19 +906,91 @@ fn language_at(index: i32) -> Option<String> {
 /// Imported cues keep the file's timing, including captions shorter than
 /// generated speech segments. The title command applies the engine's minimum
 /// clip duration where needed.
-fn srt_commands(cues: Vec<srt::Cue>, look: (f64, f64), base: Option<&TextStyle>) -> Vec<Command> {
+///
+/// A file times its cues and not their words: with a look for the word
+/// being said (`lit`), each cue's span is shared among its words by their
+/// lengths.
+fn srt_commands(
+    cues: Vec<srt::Cue>,
+    look: (f64, f64),
+    base: Option<&TextStyle>,
+    lit: Option<(KaraokeMode, RunStyle)>,
+) -> Vec<Command> {
     cues.into_iter()
         .filter(|cue| !cue.text.trim().is_empty())
         .map(|cue| {
+            let text = cue.text.trim().to_owned();
+            let words = spread_words(&text, 0.0, cue.end - cue.start);
             caption_clip(
-                cue.text.trim().to_owned(),
+                text,
                 cue.start,
                 cue.end - cue.start,
                 look,
                 base,
+                lit.clone().map(|lit| timed(words, Some(lit))),
             )
         })
         .collect()
+}
+
+/// The look the word being said takes, by what the sheet remembers: how
+/// it moves through the words and its colour, or None for captions that
+/// are one picture throughout.
+fn lit_look(prefs: &crate::prefs::Preferences) -> Option<(KaraokeMode, RunStyle)> {
+    let mode = match prefs.caption_highlight {
+        1 => KaraokeMode::Active,
+        2 => KaraokeMode::Fill,
+        _ => return None,
+    };
+    let colour = HIGHLIGHTS[prefs.caption_highlight_colour.min(HIGHLIGHTS.len() - 1)];
+    Some((
+        mode,
+        RunStyle {
+            color: Some(colour.to_owned()),
+            ..RunStyle::default()
+        },
+    ))
+}
+
+/// A caption's words in time, wearing `lit` as they are said. With no
+/// look the times are kept all the same: they are what a karaoke look
+/// given later, and an export with each word's time, are made from.
+fn timed(words: Vec<WordTime>, lit: Option<(KaraokeMode, RunStyle)>) -> Karaoke {
+    let (mode, style) = lit.unwrap_or_default();
+    Karaoke { words, mode, style }
+}
+
+/// `content`'s words over `from..until`, each by its length: the times a
+/// caption with none measured is given.
+fn spread_words(content: &str, from: f64, until: f64) -> Vec<WordTime> {
+    let lengths: Vec<usize> = karaoke::word_ranges(content)
+        .into_iter()
+        .map(|(start, end)| end - start)
+        .collect();
+    karaoke::spread(&lengths, from, until)
+}
+
+/// The shortest a caption is held, so one quick word is not a flicker.
+const SHORTEST_CAPTION: f64 = 0.2;
+
+/// Captions as clips on one lane want them: none shorter than
+/// [`SHORTEST_CAPTION`] where there is room for it, and none running into
+/// the next - whisper's phrases can touch or overlap by a few hundredths,
+/// and two clips cannot share a lane's time.
+fn held_apart(mut captions: Vec<Caption>) -> Vec<Caption> {
+    captions.retain(|caption| !caption.text.trim().is_empty());
+    captions.sort_by(|a, b| a.start.total_cmp(&b.start));
+    for index in 0..captions.len() {
+        let next = captions.get(index + 1).map(|next| next.start);
+        let caption = &mut captions[index];
+        let wanted = caption.end.max(caption.start + SHORTEST_CAPTION);
+        caption.end = match next {
+            Some(next) => wanted.min(next).max(caption.start),
+            None => wanted,
+        };
+    }
+    captions.retain(|caption| caption.end - caption.start > 1e-3);
+    captions
 }
 
 /// The lane an SRT export writes out.
@@ -785,6 +1020,60 @@ fn export_lane(studio: &Studio) -> Option<ExportLane> {
             track_id,
             busiest: true,
         }),
+    }
+}
+
+/// How an ASS file of the lane's captions looks: the first caption's own
+/// face, size, colours, outline and place, in the frame's pixels, so the
+/// file read by a player or burnt in by another tool looks like the
+/// captions do here. The word being said takes the caption's own spoken
+/// colour, where it has one.
+fn ass_look(studio: &Studio, track_id: &str) -> AssLook {
+    let video = &studio.timeline().video;
+    let (width, height) = (video.width.max(2), video.height.max(2));
+    let first = studio
+        .timeline()
+        .clips
+        .iter()
+        .filter(|clip| clip.kind == ClipKind::Text && clip.track_id == track_id)
+        .min_by(|a, b| a.start.total_cmp(&b.start));
+    let Some((clip, text)) = first.and_then(|clip| Some((clip, clip.text.as_ref()?))) else {
+        return AssLook {
+            frame: (width, height),
+            ..AssLook::default()
+        };
+    };
+    let frame_height = f64::from(height);
+    // The clip's centre as a fraction of the frame's height from the
+    // middle, positive down: the top third is "top", the bottom "bottom".
+    let (alignment, margin_v) = if clip.offset_y > 0.17 {
+        (2, ((0.5 - clip.offset_y) * frame_height).max(0.0))
+    } else if clip.offset_y < -0.17 {
+        (8, ((0.5 + clip.offset_y) * frame_height).max(0.0))
+    } else {
+        (5, 0.0)
+    };
+    // The style's size is its cap height; ASS sizes a face by its line,
+    // which for most faces is about the cap height over 0.7.
+    let size = text.font_size * frame_height / 0.7;
+    AssLook {
+        frame: (width, height),
+        font: text.font_family.trim().trim_matches('"').to_owned(),
+        size,
+        bold: text.font_weight >= 600.0,
+        italic: text.italic,
+        color: text.color.clone(),
+        spoken: text
+            .karaoke
+            .as_ref()
+            .and_then(|karaoke| karaoke.style.color.clone()),
+        outline: text.stroke_color.clone(),
+        outline_width: text.stroke_width * frame_height,
+        shadow: text.shadow,
+        alignment,
+        // Half the line off the margin, since the margin is to the
+        // block's edge and the clip's place is its centre.
+        margin_v: (margin_v - size / 2.0).max(0.0).round() as u32,
     }
 }
 
@@ -902,6 +1191,7 @@ fn caption_clip(
     duration: f64,
     look: (f64, f64),
     base: Option<&TextStyle>,
+    karaoke: Option<Karaoke>,
 ) -> Command {
     let (offset_y, font_size) = look;
     // The kept look where there is one - family, weight, colours, stroke,
@@ -913,8 +1203,10 @@ fn caption_clip(
             font_size,
             max_width: 0.0,
             max_height: 0.0,
-            // Runs are some words' looks, and these are other words.
+            // Runs are some words' looks, and these are other words;
+            // so are the times of them.
             runs: Vec::new(),
+            karaoke,
             ..base.clone()
         },
         None => TextStyle {
@@ -922,6 +1214,7 @@ fn caption_clip(
             font_family: "Hanken Grotesk".to_owned(),
             font_size,
             font_weight: 600.0,
+            karaoke,
             ..TextStyle::default()
         },
     };
@@ -1065,7 +1358,7 @@ mod tests {
         let cues = concat_project::srt::parse(
             "1\n00:00:01,000 --> 00:00:01,100\nOlá\nAção\n\n2\n00:00:02,000 --> 00:00:03,000\nFim\n",
         ).unwrap();
-        let commands = super::srt_commands(cues.clone(), (0.35, 0.04), None);
+        let commands = super::srt_commands(cues.clone(), (0.35, 0.04), None, None);
         let mut editor = concat_project::Editor::new();
         editor
             .apply(concat_project::Command::Batch { commands })
@@ -1143,7 +1436,7 @@ mod tests {
             end: 1.0,
             text: "  ".into(),
         }];
-        assert!(super::srt_commands(cues, (0.35, 0.04), None).is_empty());
+        assert!(super::srt_commands(cues, (0.35, 0.04), None, None).is_empty());
     }
 
     /// A clip in the voice list is its file and where it starts, in

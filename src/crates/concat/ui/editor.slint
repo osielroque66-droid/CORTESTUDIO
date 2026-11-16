@@ -444,6 +444,8 @@ export global Editor {
     callback captions-language-changed(index: int);
     callback captions-placement-changed(index: int);
     callback captions-size-changed(index: int);
+    callback captions-choice-changed(which: int, index: int);
+    callback captions-apply-highlight();
     callback captions-begin();
     callback captions-cancel();
     callback captions-import-srt();

@@ -27,6 +27,7 @@ use concat_core::shader::RevealMap;
 
 use concat_export::flatten::export_base;
 use concat_export::{ClipKind, ExportClip};
+use concat_project::karaoke::KaraokeState;
 use concat_project::model::{
     ClipKind as ModelClipKind, KeyProperty, Project, ShapeKind, ShapeStyle, TextAlign, TextStyle,
 };
@@ -287,9 +288,16 @@ impl Titles {
             self.live.lock().unwrap_or_else(|e| e.into_inner()).begin();
         }
         let (plain_text, plain_shape) = (TextStyle::default(), ShapeStyle::default());
-        let keys = keys_of(project, width, height, (&plain_text, &plain_shape));
+        let stretches = stretches_of(project);
+        let jobs = jobs_of(
+            project,
+            width,
+            height,
+            (&plain_text, &plain_shape),
+            &stretches,
+        );
         if paint {
-            self.paint_ahead(project, width, height, live, &keys, &stopped);
+            self.paint_ahead(project, width, height, live, &jobs, &stopped);
         }
         if stopped() {
             return None;
@@ -297,9 +305,18 @@ impl Titles {
         let timeline = project.active();
         let mut out = Vec::new();
         let mut complete = true;
-        for (clip, key) in timeline.clips.iter().zip(keys) {
-            let Some((key, painting)) = key else {
-                continue;
+        for job in jobs {
+            let (clip, key, painting) = (&timeline.clips[job.clip], job.key, job.painting);
+            // A stretch of a karaoke title is a clip of its own for as
+            // long as its word is said, and a part of the title for
+            // everything the title does over its length.
+            let (start, duration, part_of) = match job.stretch {
+                Some((from, until)) => (
+                    clip.start + from,
+                    until - from,
+                    Some((clip.start, clip.duration)),
+                ),
+                None => (clip.start, clip.duration, None),
             };
             if stopped() {
                 return None;
@@ -399,7 +416,8 @@ impl Titles {
                         Painting::Title(_) => Some(Arc::clone(&art.reveal)),
                         Painting::Shape(_) => None,
                     },
-                    ..ExportClip::blank(ClipKind::Image, clip.start, clip.duration, index)
+                    part_of,
+                    ..ExportClip::blank(ClipKind::Image, start, duration, index)
                 },
                 block: art.block,
                 offset: art.offset,
@@ -583,14 +601,13 @@ impl Titles {
         width: u32,
         height: u32,
         live: bool,
-        keys: &[Option<(u64, Painting<'_>)>],
+        jobs: &[Job<'_>],
         stopped: &(dyn Fn() -> bool + Sync),
     ) {
         let mut seen = HashSet::new();
-        let todo: Vec<(u64, Painting<'_>)> = keys
+        let todo: Vec<(u64, Painting<'_>)> = jobs
             .iter()
-            .flatten()
-            .copied()
+            .map(|job| (job.key, job.painting))
             .filter(|(key, _)| seen.insert(*key))
             .filter(|(key, _)| {
                 if live {
@@ -671,28 +688,85 @@ impl Titles {
 /// FNV-1a over the bytes, as the other caches on disk are keyed, because a
 /// file's name has to mean the same thing after a toolchain upgrade and the
 /// standard hasher makes no such promise.
-/// Each clip's key and painting, in the timeline's order - `None` for a
-/// clip that is neither a title nor a shape - so a pass names each once.
-/// A clip with no style of its own is painted in `plain`.
-fn keys_of<'a>(
-    project: &'a Project,
-    width: u32,
-    height: u32,
-    plain: (&'a TextStyle, &'a ShapeStyle),
-) -> Vec<Option<(u64, Painting<'a>)>> {
+/// One picture a pass has to have: a title or a shape, or one stretch of
+/// a title that lights its words as they are said.
+#[derive(Clone, Copy)]
+struct Job<'a> {
+    /// The clip's place in the timeline's list.
+    clip: usize,
+    key: u64,
+    painting: Painting<'a>,
+    /// The seconds of the clip the picture is up for, from the clip's
+    /// start; None for the whole of it.
+    stretch: Option<(f64, f64)>,
+}
+
+/// The stretches each clip of the active timeline is painted in, in the
+/// timeline's order: None for every clip that is one picture throughout,
+/// which is every shape, every clip that is not a title, and every title
+/// with no words to light. See `concat_project::karaoke`.
+fn stretches_of(project: &Project) -> Vec<Option<Vec<KaraokeState>>> {
     project
         .active()
         .clips
         .iter()
-        .map(|clip| {
-            let painting = match clip.kind {
-                ModelClipKind::Text => Painting::Title(clip.text.as_ref().unwrap_or(plain.0)),
-                ModelClipKind::Shape => Painting::Shape(clip.shape.as_ref().unwrap_or(plain.1)),
-                _ => return None,
-            };
-            Some((key_of(project, painting, width, height), painting))
+        .map(|clip| match clip.kind {
+            ModelClipKind::Text => clip
+                .text
+                .as_ref()
+                .and_then(|text| text.karaoke_states(clip.source_start, clip.duration)),
+            _ => None,
         })
         .collect()
+}
+
+/// Every picture the active timeline's titles and shapes need, in the
+/// timeline's order, a karaoke title's stretches in the order they play.
+/// A clip with no style of its own is painted in `plain`. `stretches` is
+/// [`stretches_of`] the same project.
+fn jobs_of<'a>(
+    project: &'a Project,
+    width: u32,
+    height: u32,
+    plain: (&'a TextStyle, &'a ShapeStyle),
+    stretches: &'a [Option<Vec<KaraokeState>>],
+) -> Vec<Job<'a>> {
+    let mut jobs = Vec::new();
+    for (index, clip) in project.active().clips.iter().enumerate() {
+        match clip.kind {
+            ModelClipKind::Text => match stretches.get(index).and_then(Option::as_ref) {
+                Some(states) => jobs.extend(states.iter().map(|state| {
+                    let painting = Painting::Title(&state.style);
+                    Job {
+                        clip: index,
+                        key: key_of(project, painting, width, height),
+                        painting,
+                        stretch: Some((state.from, state.until)),
+                    }
+                })),
+                None => {
+                    let painting = Painting::Title(clip.text.as_ref().unwrap_or(plain.0));
+                    jobs.push(Job {
+                        clip: index,
+                        key: key_of(project, painting, width, height),
+                        painting,
+                        stretch: None,
+                    });
+                }
+            },
+            ModelClipKind::Shape => {
+                let painting = Painting::Shape(clip.shape.as_ref().unwrap_or(plain.1));
+                jobs.push(Job {
+                    clip: index,
+                    key: key_of(project, painting, width, height),
+                    painting,
+                    stretch: None,
+                });
+            }
+            _ => {}
+        }
+    }
+    jobs
 }
 
 fn key_of(project: &Project, painting: Painting<'_>, width: u32, height: u32) -> u64 {
@@ -734,7 +808,7 @@ fn key_of(project: &Project, painting: Painting<'_>, width: u32, height: u32) ->
 /// How many painted titles the directory keeps. Each is a frame-sized PNG -
 /// larger for a title whose ink runs past the frame - mostly transparent, so this is tens of megabytes at most; above it the
 /// oldest go, and a title that is still in use paints again.
-const TITLES_KEPT: usize = 400;
+const TITLES_KEPT: usize = 2000;
 
 /// Removes the oldest painted titles until `keep` remain. Sidecars go with
 /// their PNGs. Best effort throughout: a file that will not go is left.

@@ -327,6 +327,14 @@ pub struct ExportClip {
     /// it back through `reveal_order()`.
     #[serde(skip)]
     pub reveal_map: Option<Arc<RevealMap>>,
+    /// The longer clip this one is a stretch of, as its start and its
+    /// duration in seconds; absent for a clip that is whole. Set by the
+    /// host for a title that lights its words as they are said - one
+    /// picture per word, each a clip - so the title's keys, moves and
+    /// effects still run along the title. See
+    /// `concat_core::timeline::Clip::part_of`.
+    #[serde(default)]
+    pub part_of: Option<(f64, f64)>,
     /// What fills the frame behind the picture where it does not reach, as
     /// the flattener resolved it - the clip's own background or its
     /// timeline's, for a picture on the lowest picture lane; absent for
@@ -441,6 +449,7 @@ impl ExportClip {
             voice: None,
             highlighted: false,
             reveal_map: None,
+            part_of: None,
             backdrop: None,
         }
     }

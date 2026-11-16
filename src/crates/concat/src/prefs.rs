@@ -71,6 +71,18 @@ pub struct Preferences {
     /// The text preset captions are set in, by id; `None`, "default" and
     /// an id no longer on the list are the plain look.
     pub caption_style: Option<String>,
+    /// How the captions sheet cuts a voice's words into captions, by its
+    /// row: 0 the phrases as heard, 1 a word at a time, 2 pairs, 3 short
+    /// bursts, 4 sentences.
+    pub caption_grouping: usize,
+    /// How the word being said is lit, by the sheet's row: 0 not at all,
+    /// 1 the word alone, 2 every word said so far.
+    pub caption_highlight: usize,
+    /// The lit word's colour, by the sheet's row.
+    pub caption_highlight_colour: usize,
+    /// The format captions are written out in, by the sheet's row: 0
+    /// SubRip, 1 WebVTT, 2 ASS, 3 plain text.
+    pub caption_format: usize,
     /// The chosen speech model id.
     pub tts_model: Option<String>,
     /// The chosen voice id.

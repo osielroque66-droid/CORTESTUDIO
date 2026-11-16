@@ -1457,6 +1457,7 @@ fn new_title_style(prefs: &crate::prefs::Preferences) -> TextStyle {
     TextStyle {
         content: t("studio.newTitle"),
         runs: Vec::new(),
+        karaoke: None,
         ..base
     }
 }

@@ -853,6 +853,12 @@ pub struct Segment {
     pub end: f64,
     /// What was said.
     pub text: String,
+    /// The words of it with when each was said, in the same seconds, in
+    /// order: what a caption lights its words by. Empty when whisper gave
+    /// no times for them, and for a line tidied since it was heard; a
+    /// caller then shares the line's span among its words.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<crate::words::Word>,
 }
 
 /// What to transcribe.
@@ -1227,6 +1233,12 @@ impl Transcriber {
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
         params.set_suppress_blank(true);
+        // When each token was heard, beside what it was: a caption lights
+        // its words as they are said by these. Whisper works them out
+        // after a window is decoded, from the timestamp probabilities it
+        // already has, so the words it writes are the same with or
+        // without (`max_len` stays zero: no line is cut by them).
+        params.set_token_timestamps(true);
         // Non-speech tokens are left to whisper: "[Music]", "(tepuk
         // tangan)" and "♪" are how it says what it hears is not words,
         // and `keep_segment` drops those lines. Suppressed
@@ -1299,7 +1311,24 @@ impl Transcriber {
             if recipe.prune {
                 text = unloop(&text);
             }
-            keep_segment(start, end, text)
+            // The line's tokens as words, on the sound's own clock like
+            // the line, and held inside it.
+            let pieces: Vec<crate::words::Piece> = (0..segment.n_tokens())
+                .filter_map(|index| segment.get_token(index))
+                .filter_map(|token| {
+                    let data = token.token_data();
+                    // Timestamps and the other special tokens sit past
+                    // end-of-text.
+                    (data.id < eot).then_some(())?;
+                    Some(crate::words::Piece {
+                        bytes: token.to_bytes().ok()?.to_vec(),
+                        start: reel.to_source(data.t0 as f64 / 100.0),
+                        end: reel.to_source(data.t1 as f64 / 100.0),
+                    })
+                })
+                .collect();
+            let words = crate::words::held_within(crate::words::words(&pieces), start, end);
+            keep_segment(start, end, text).map(|kept| Segment { words, ..kept })
         });
         let lines: Vec<Segment> = lines.collect();
         Ok(if recipe.prune {
@@ -1329,7 +1358,12 @@ fn keep_segment(start: f64, end: f64, text: String) -> Option<Segment> {
     if direction || !text.chars().any(char::is_alphanumeric) {
         return None;
     }
-    (end > start).then_some(Segment { start, end, text })
+    (end > start).then_some(Segment {
+        start,
+        end,
+        text,
+        words: Vec::new(),
+    })
 }
 
 /// Whisper's own lines for what is not speech: a window it gives better
@@ -1863,6 +1897,7 @@ mod tests {
             start,
             end: start + 1.0,
             text: text.to_owned(),
+            words: Vec::new(),
         };
         let kept = drop_repeats(vec![
             line(0.0, "Yes."),

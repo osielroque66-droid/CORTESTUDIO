@@ -320,6 +320,7 @@ impl Studio {
         // them: a run says nothing about another title's words.
         style.content.clear();
         style.runs.clear();
+        style.karaoke = None;
         self.prefs.title_style = Some(style);
         self.prefs.save(&self.host.dirs);
         self.notify(&t("textPanel.newTitlesUseThisStyle"), false);

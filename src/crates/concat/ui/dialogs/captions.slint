@@ -66,6 +66,16 @@ export struct CaptionsSheetData {
     placement: int,
     /// 0 Small, 1 Medium, 2 Large
     size: int,
+    /// How a voice's words are cut into captions: 0 the phrases as heard,
+    /// 1 a word at a time, 2 pairs, 3 short bursts, 4 sentences.
+    grouping: int,
+    /// How the word being said is lit: 0 not at all, 1 the word alone,
+    /// 2 every word said so far.
+    highlight: int,
+    /// Row in the lit word's colours.
+    highlight-colour: int,
+    /// The format captions are written out in: 0 SRT, 1 VTT, 2 ASS, 3 TXT.
+    format: int,
     running: bool,
     /// 0..1: where the transcription surely is.
     progress: float,
@@ -102,12 +112,20 @@ export component CaptionsForm inherits VerticalLayout {
     callback language-changed(index: int);
     callback placement-changed(index: int);
     callback size-changed(index: int);
+    /// A row picked in one of the choices kept between runs: `which` is
+    /// 0 for how the words are cut, 1 for how the spoken word is lit,
+    /// 2 for its colour, 3 for the format captions are written out in.
+    callback choice-changed(which: int, index: int);
+    /// Give the captions already on the timeline the lit word chosen here.
+    callback apply-highlight();
     callback begin();
     callback cancel();
     callback import-srt();
     callback export-srt();
 
     property <bool> from-voice: root.data.from-voice;
+    /// The lit word's colours, in the rows' order.
+    property <[color]> colours: [#ffe600, #39ff14, #00e5ff, #ff3d9a, #ff8a00, #ff3b30, #ffffff];
 
     // The script being typed, held apart from `data.text` the way the Field
     // primitive holds its draft: a TextInput's binding is dropped on the
@@ -257,13 +275,85 @@ export component CaptionsForm inherits VerticalLayout {
                 }
             }
 
+            // How a voice's words become lines: a script has its own
+            // sentences, so the choice is the voice's alone.
+            if root.from-voice: DialogRow {
+                label: I18n.t("captions.grouping");
+                Select {
+                    options: [
+                        I18n.t("captions.groupPhrase"),
+                        I18n.t("captions.groupWord"),
+                        I18n.t("captions.groupPair"),
+                        I18n.t("captions.groupBurst"),
+                        I18n.t("captions.groupSentence"),
+                    ];
+                    current: root.data.grouping;
+                    changed(index) => { root.choice-changed(0, index); }
+                }
+            }
+
             Text {
-                text: root.from-voice
-                    ? I18n.t("captions.oneTitlePerPhrase")
-                    : I18n.t("captions.oneTitlePerSentence");
+                text: !root.from-voice ? I18n.t("captions.oneTitlePerSentence")
+                    : root.data.grouping == 0 ? I18n.t("captions.oneTitlePerPhrase")
+                    : I18n.t("captions.cutToTheWords");
                 color: Theme.fg-dim;
                 font-size: Theme.fs-sm;
                 wrap: word-wrap;
+            }
+        }
+
+        // The word being said, lit: in preview and in the exported video.
+        if !root.data.running: DialogSection {
+            title: I18n.t("captions.wordHighlight");
+
+            DialogRow {
+                label: I18n.t("captions.highlightMode");
+                Select {
+                    options: [
+                        I18n.t("captions.highlightNone"),
+                        I18n.t("captions.highlightActive"),
+                        I18n.t("captions.highlightFill"),
+                    ];
+                    current: root.data.highlight;
+                    changed(index) => { root.choice-changed(1, index); }
+                }
+            }
+
+            if root.data.highlight > 0: DialogRow {
+                label: I18n.t("common.color");
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+                    for colour[index] in root.colours: Rectangle {
+                        width: 22px;
+                        height: 22px;
+                        border-radius: 11px;
+                        background: colour;
+                        border-width: root.data.highlight-colour == index ? 2px : 1px;
+                        border-color: root.data.highlight-colour == index ? Theme.accent : Theme.line;
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.choice-changed(2, index); }
+                        }
+                    }
+                }
+            }
+
+            Text {
+                text: root.data.highlight == 0 ? I18n.t("captions.highlightNoneHelp")
+                    : root.data.highlight == 1 ? I18n.t("captions.highlightActiveHelp")
+                    : I18n.t("captions.highlightFillHelp");
+                color: Theme.fg-dim;
+                font-size: Theme.fs-sm;
+                wrap: word-wrap;
+            }
+
+            Button {
+                block: true;
+                ghost: true;
+                glyph: Glyph.text-mark;
+                label: I18n.t("captions.applyToExisting");
+                clicked => { root.apply-highlight(); }
             }
         }
 
@@ -370,16 +460,24 @@ export component CaptionsForm inherits VerticalLayout {
             // look above, timed as the file says; or a lane of titles
             // written out: the selected title's lane, or with none
             // selected the lane with the most titles, the captions'.
+            if !root.data.running: Button {
+                block: true;
+                ghost: true;
+                glyph: Glyph.import;
+                label: I18n.t("captions.importSrt");
+                clicked => { root.import-srt(); }
+            }
+
+            // Written out as SubRip, WebVTT, ASS (with each word's time,
+            // as karaoke tags) or plain text.
             if !root.data.running: HorizontalLayout {
                 spacing: 8px;
 
-                Button {
-                    horizontal-stretch: 1;
-                    block: true;
-                    ghost: true;
-                    glyph: Glyph.import;
-                    label: I18n.t("captions.importSrt");
-                    clicked => { root.import-srt(); }
+                Select {
+                    width: 92px;
+                    options: ["SRT", "VTT", "ASS", "TXT"];
+                    current: root.data.format;
+                    changed(index) => { root.choice-changed(3, index); }
                 }
 
                 Button {
@@ -387,7 +485,7 @@ export component CaptionsForm inherits VerticalLayout {
                     block: true;
                     ghost: true;
                     glyph: Glyph.export;
-                    label: I18n.t("captions.exportSrt");
+                    label: I18n.t("captions.exportSubtitles");
                     clicked => { root.export-srt(); }
                 }
             }
@@ -406,6 +504,8 @@ export component CaptionsDialog inherits Modal {
     callback language-changed(index: int);
     callback placement-changed(index: int);
     callback size-changed(index: int);
+    callback choice-changed(which: int, index: int);
+    callback apply-highlight();
     callback begin();
     callback cancel();
     callback import-srt();
@@ -428,6 +528,8 @@ export component CaptionsDialog inherits Modal {
         language-changed(index) => { root.language-changed(index); }
         placement-changed(index) => { root.placement-changed(index); }
         size-changed(index) => { root.size-changed(index); }
+        choice-changed(which, index) => { root.choice-changed(which, index); }
+        apply-highlight => { root.apply-highlight(); }
         begin => { root.begin(); }
         cancel => { root.cancel(); }
         import-srt => { root.import-srt(); }

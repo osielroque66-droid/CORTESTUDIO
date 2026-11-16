@@ -2725,3 +2725,122 @@ fn consolidation_keeps_the_global_frame_grid_at_fractional_starts() {
 
 #[path = "export/consolidate.rs"]
 mod consolidate;
+
+/// How many pixels of the frame shown at `at` are red and how many white,
+/// in the frame's left half and in its right.
+fn ink(exported: &Exported, at: f64) -> [(usize, usize); 2] {
+    let index = ((at * exported.fps).floor() as usize).min(exported.frames.len() - 1);
+    let frame = &exported.frames[index];
+    let mut halves = [(0, 0); 2];
+    for y in 0..frame.height() {
+        for x in 0..frame.width() {
+            let [r, g, b, _] = frame.pixel(x, y).expect("inside the frame");
+            let half = &mut halves[usize::from(x >= frame.width() / 2)];
+            if r > 150 && g < 110 && b < 110 {
+                half.0 += 1;
+            } else if r > 170 && g > 170 && b > 170 {
+                half.1 += 1;
+            }
+        }
+    }
+    halves
+}
+
+/// A caption that knows when its words are said lights each as it is
+/// said, in the exported file: the word on the left for the first second
+/// and the one on the right for the second, the other in the caption's
+/// own colour. Cut in two, each half still lights its words at the moment
+/// they always were; and the times come back from a saved project.
+#[test]
+fn a_karaoke_caption_lights_each_word_as_it_is_said() {
+    use concat_project::karaoke::{Karaoke, KaraokeMode, WordTime};
+    use concat_project::model::RunStyle;
+
+    let scratch = Scratch::new("karaoke");
+    let mut studio = Studio::new(scratch.path(), "Karaoke", video(320, 180, 30, 1));
+    let caption = |mode| TextStyle {
+        content: "MMMM MMMM".to_owned(),
+        font_size: 0.2,
+        font_weight: 900.0,
+        color: "#ffffff".to_owned(),
+        shadow: false,
+        karaoke: Some(Karaoke {
+            words: vec![
+                WordTime {
+                    at: 0.0,
+                    until: 1.0,
+                },
+                WordTime {
+                    at: 1.0,
+                    until: 2.0,
+                },
+            ],
+            mode,
+            style: RunStyle {
+                color: Some("#ff0000".to_owned()),
+                ..RunStyle::default()
+            },
+        }),
+        ..TextStyle::default()
+    };
+    let id = studio
+        .apply(Command::AddTextClip {
+            track_id: None,
+            above: true,
+            start: 0.0,
+            style: Some(caption(KaraokeMode::Active)),
+            duration: Some(2.0),
+            offset_y: None,
+        })
+        .expect("the caption has an id");
+
+    let lit = |exported: &Exported, what: &str| {
+        let [left, right] = ink(exported, 0.5);
+        assert!(
+            left.0 > 100 && left.1 < left.0 / 4 && right.1 > 100 && right.0 == 0,
+            "{what}: at 0.5 s the first word is red and the second white, not {left:?} and {right:?}"
+        );
+        let [left, right] = ink(exported, 1.5);
+        assert!(
+            right.0 > 100 && right.1 < right.0 / 4 && left.1 > 100 && left.0 == 0,
+            "{what}: at 1.5 s the second word is red and the first white, not {left:?} and {right:?}"
+        );
+    };
+    let whole = studio.export("karaoke");
+    whole.expect_length(2.0);
+    lit(&whole, "whole");
+
+    // Cut between the two words' middles: the tail's clock starts 0.7 s
+    // in, and its words are lit by the same clock.
+    studio.apply(Command::SplitClips {
+        clip_ids: vec![id.clone()],
+        time: 0.7,
+    });
+    assert_eq!(studio.clip_ids().len(), 2, "the caption is two clips");
+    let split = studio.export("karaoke split");
+    split.expect_length(2.0);
+    lit(&split, "split");
+
+    // Filling: by the second word, both are red.
+    let ids = studio.clip_ids();
+    for id in ids {
+        studio.apply(Command::UpdateClip {
+            clip_id: id,
+            patch: ClipPatch {
+                text: Some(Some(caption(KaraokeMode::Fill))),
+                ..ClipPatch::default()
+            },
+        });
+    }
+    let filled = studio.export("karaoke fill");
+    let [left, right] = ink(&filled, 1.5);
+    assert!(
+        left.0 > 100 && right.0 > 100 && left.1 < left.0 / 4 && right.1 < right.0 / 4,
+        "filling: at 1.5 s both words are red, not {left:?} and {right:?}"
+    );
+    let [left, right] = ink(&filled, 0.5);
+    assert!(
+        left.0 > 100 && right.0 == 0 && right.1 > 100,
+        "filling: at 0.5 s only the first word is red, not {left:?} and {right:?}"
+    );
+}

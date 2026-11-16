@@ -2465,6 +2465,12 @@ fn start(project: Option<std::path::PathBuf>, smoke: Smoke) -> Result<(), slint:
     app.on_captions_size_changed(on_window!(|state, index: i32| {
         state.handle(Msg::Captions(CaptionsMsg::SizeChanged(index)));
     }));
+    app.on_captions_choice_changed(on_window!(|state, which: i32, index: i32| {
+        state.handle(Msg::Captions(CaptionsMsg::ChoiceChanged(which, index)));
+    }));
+    app.on_captions_apply_highlight(on_window!(|state| {
+        state.handle(Msg::Captions(CaptionsMsg::ApplyHighlight));
+    }));
     app.on_captions_begin(on_window!(|state| {
         state.handle(Msg::Captions(CaptionsMsg::Begin));
     }));
@@ -2501,6 +2507,12 @@ fn start(project: Option<std::path::PathBuf>, smoke: Smoke) -> Result<(), slint:
     }));
     editor.on_captions_size_changed(on_window!(|state, index: i32| {
         state.handle(Msg::Captions(CaptionsMsg::SizeChanged(index)));
+    }));
+    editor.on_captions_choice_changed(on_window!(|state, which: i32, index: i32| {
+        state.handle(Msg::Captions(CaptionsMsg::ChoiceChanged(which, index)));
+    }));
+    editor.on_captions_apply_highlight(on_window!(|state| {
+        state.handle(Msg::Captions(CaptionsMsg::ApplyHighlight));
     }));
     editor.on_captions_begin(on_window!(|state| {
         state.handle(Msg::Captions(CaptionsMsg::Begin));

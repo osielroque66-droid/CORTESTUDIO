@@ -25,6 +25,7 @@ pub mod transcribe;
 pub mod tts;
 #[cfg(feature = "isolate")]
 pub mod vocals;
+pub mod words;
 
 pub use transcribe::Transcriber;
 pub use tts::Speech;

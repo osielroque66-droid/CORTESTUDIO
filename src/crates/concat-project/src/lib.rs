@@ -22,11 +22,13 @@
 //! more than the adjacency.
 
 pub mod capcut;
+pub mod captions;
 pub mod commands;
 #[cfg(test)]
 mod consolidate_tests;
 pub mod doc;
 pub mod editor;
+pub mod karaoke;
 pub mod model;
 pub mod placement;
 pub mod runs;

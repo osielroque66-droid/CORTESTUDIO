@@ -2461,6 +2461,17 @@ pub struct TextStyle {
     /// a document with them as the title in its own look.
     #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "wire::list")]
     pub runs: Vec<TextRun>,
+    /// When each of the words is said, and the look the one being said
+    /// takes: what makes a caption light its words as they are spoken.
+    /// None - the default - for a title that is one picture throughout,
+    /// and then not written at all, so a document without it is the
+    /// document it always was and an older build reads a karaoke caption
+    /// as the plain one. See [`crate::karaoke`].
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "wire::karaoke"
+    )]
+    pub karaoke: Option<crate::karaoke::Karaoke>,
 }
 
 impl TextStyle {
@@ -2494,6 +2505,7 @@ impl TextStyle {
         self.background_padding_y =
             finite(self.background_padding_y, base.background_padding_y).max(0.0);
         self.tidy_runs();
+        self.tidy_karaoke();
         self
     }
 }
@@ -2527,6 +2539,7 @@ impl Default for TextStyle {
             max_width: 0.0,
             max_height: 0.0,
             runs: Vec::new(),
+            karaoke: None,
         }
     }
 }
@@ -2626,6 +2639,16 @@ pub(crate) mod wire {
     pub fn color_space<'de, D: Deserializer<'de>>(deserializer: D) -> Result<ColorSpace, D::Error> {
         let value = Value::deserialize(deserializer)?;
         Ok(serde_json::from_value(value).unwrap_or_default())
+    }
+
+    /// A title's karaoke where it parses, and none where it does not: a
+    /// shape from a newer build opens as the plain title rather than not
+    /// at all.
+    pub fn karaoke<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<crate::karaoke::Karaoke>, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        Ok(serde_json::from_value(value).ok())
     }
 
     /// A text alignment by name, centred for one this build does not know.
