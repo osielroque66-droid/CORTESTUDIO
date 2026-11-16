@@ -50,7 +50,7 @@ import {
     MissingMediaItem,
 } from "dialogs/relink.slint";
 import { ConfirmData, ConfirmDialog } from "dialogs/confirm.slint";
-import { CaptionsDialog, CaptionsSheetData } from "dialogs/captions.slint";
+import { CaptionsDialog, CaptionRowData, CaptionsSheetData } from "dialogs/captions.slint";
 import { SpeechDialog, SpeechSheetData } from "dialogs/speech.slint";
 import { NewVoiceData, NewVoiceDialog } from "dialogs/new-voice.slint";
 import { AvatarData } from "primitives/avatar.slint";
@@ -181,6 +181,7 @@ export {
     ToastData,
     ProjectSheetData,
     CaptionsSheetData,
+    CaptionRowData,
     SpeechSheetData,
     VoiceoverData,
     SoundCardData,
@@ -462,6 +463,7 @@ export component App inherits Window {
     callback captions-size-changed(index: int);
     callback captions-choice-changed(which: int, index: int);
     callback captions-apply-highlight();
+    callback captions-row-action(action: int, index: int, text: string);
     callback captions-begin();
     callback captions-cancel();
     callback captions-import-srt();
@@ -896,6 +898,7 @@ export component App inherits Window {
             size-changed(index) => { root.captions-size-changed(index); }
             choice-changed(which, index) => { root.captions-choice-changed(which, index); }
             apply-highlight => { root.captions-apply-highlight(); }
+            row-action(action, index, text) => { root.captions-row-action(action, index, text); }
             begin => { root.captions-begin(); }
             cancel => { root.captions-cancel(); }
             import-srt => { root.captions-import-srt(); }

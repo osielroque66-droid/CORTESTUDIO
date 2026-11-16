@@ -2471,6 +2471,15 @@ fn start(project: Option<std::path::PathBuf>, smoke: Smoke) -> Result<(), slint:
     app.on_captions_apply_highlight(on_window!(|state| {
         state.handle(Msg::Captions(CaptionsMsg::ApplyHighlight));
     }));
+    app.on_captions_row_action(on_window!(
+        |state, action: i32, index: i32, text: slint::SharedString| {
+            state.handle(Msg::Captions(CaptionsMsg::RowAction(
+                action,
+                index,
+                text.to_string(),
+            )));
+        }
+    ));
     app.on_captions_begin(on_window!(|state| {
         state.handle(Msg::Captions(CaptionsMsg::Begin));
     }));
@@ -2514,6 +2523,15 @@ fn start(project: Option<std::path::PathBuf>, smoke: Smoke) -> Result<(), slint:
     editor.on_captions_apply_highlight(on_window!(|state| {
         state.handle(Msg::Captions(CaptionsMsg::ApplyHighlight));
     }));
+    editor.on_captions_row_action(on_window!(
+        |state, action: i32, index: i32, text: slint::SharedString| {
+            state.handle(Msg::Captions(CaptionsMsg::RowAction(
+                action,
+                index,
+                text.to_string(),
+            )));
+        }
+    ));
     editor.on_captions_begin(on_window!(|state| {
         state.handle(Msg::Captions(CaptionsMsg::Begin));
     }));

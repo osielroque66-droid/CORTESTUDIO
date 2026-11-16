@@ -16,8 +16,8 @@
 //! has a use for them: ASS writes them as `\k` karaoke tags, which a
 //! player sweeps through as the line is said.
 
-use crate::karaoke::{self, WordTime};
-use crate::model::{ClipKind, Timeline};
+use crate::karaoke::{self, Karaoke, WordTime};
+use crate::model::{ClipKind, TextRun, TextStyle, Timeline};
 
 /// One word as it was heard: its letters with their punctuation, and
 /// when, in seconds on whatever clock the caller keeps.
@@ -305,6 +305,132 @@ pub fn title_captions(timeline: &Timeline, track_id: Option<&str>) -> Vec<Captio
         .collect();
     captions.sort_by(|a, b| a.start.total_cmp(&b.start));
     captions
+}
+
+/// A title's words in time on its clip's source clock: the times it
+/// keeps, or its span - `duration` seconds from `source_start` - shared
+/// among its words by their lengths when it keeps none.
+pub fn word_times(text: &TextStyle, source_start: f64, duration: f64) -> Vec<WordTime> {
+    let kept = text
+        .karaoke
+        .as_ref()
+        .map(|karaoke| karaoke.fitted(&text.content))
+        .filter(|words| !words.is_empty());
+    kept.unwrap_or_else(|| {
+        let lengths: Vec<usize> = karaoke::word_ranges(&text.content)
+            .into_iter()
+            .map(|(from, to)| to - from)
+            .collect();
+        karaoke::spread(&lengths, source_start, source_start + duration)
+    })
+}
+
+/// The characters `from..to` of a title as a title of its own: those
+/// words, the runs that fall on them moved to where they now are, and
+/// `words` as their times when the title kept any.
+fn part(text: &TextStyle, from: usize, to: usize, words: Vec<WordTime>) -> TextStyle {
+    let content: String = text.content.chars().skip(from).take(to - from).collect();
+    let runs = text
+        .runs
+        .iter()
+        .filter(|run| run.end > from && run.start < to)
+        .map(|run| TextRun {
+            start: run.start.max(from) - from,
+            end: run.end.min(to) - from,
+            style: run.style.clone(),
+        })
+        .collect();
+    let mut part = TextStyle {
+        content,
+        runs,
+        karaoke: text.karaoke.as_ref().map(|karaoke| Karaoke {
+            words,
+            ..karaoke.clone()
+        }),
+        ..text.clone()
+    };
+    part.tidy_runs();
+    part
+}
+
+/// Where a caption is best cut in two when nobody says where: the moment
+/// its middle word begins, on the clip's source clock. None for a caption
+/// of one word, which has no two halves.
+pub fn middle_cut(text: &TextStyle, source_start: f64, duration: f64) -> Option<f64> {
+    let words = word_times(text, source_start, duration);
+    (words.len() >= 2).then(|| words[words.len() / 2].at)
+}
+
+/// A caption's words as two captions, cut at `cut` seconds on the clip's
+/// source clock: the words begun before it, and the rest, each with its
+/// own times on the same clock - what the two halves of the clip, split
+/// at that instant, are then given. A cut before the second word or
+/// after the last is drawn in to leave a word on each side. None for a
+/// caption of one word.
+pub fn split_words(
+    text: &TextStyle,
+    source_start: f64,
+    duration: f64,
+    cut: f64,
+) -> Option<(TextStyle, TextStyle)> {
+    let ranges = karaoke::word_ranges(&text.content);
+    let words = word_times(text, source_start, duration);
+    if ranges.len() < 2 || words.len() != ranges.len() {
+        return None;
+    }
+    let before = words
+        .iter()
+        .filter(|word| word.at < cut - 1e-6)
+        .count()
+        .clamp(1, ranges.len() - 1);
+    let total = text.content.chars().count();
+    Some((
+        part(text, 0, ranges[before - 1].1, words[..before].to_vec()),
+        part(text, ranges[before].0, total, words[before..].to_vec()),
+    ))
+}
+
+/// Two captions as one: the first's words, a space, the second's, with
+/// the second's runs and times moved after the first's. `shift` is what
+/// a time on the second clip's source clock is ahead of the same instant
+/// on the first's - `(second.start - second.source_start) - (first.start
+/// - first.source_start)` - so every word is still lit when it was said.
+/// The look, and how the spoken word is lit, are the first's.
+pub fn merge_words(
+    first: (&TextStyle, f64, f64),
+    second: (&TextStyle, f64, f64),
+    shift: f64,
+) -> TextStyle {
+    let (head, tail) = (first.0, second.0);
+    let offset = head.content.chars().count() + 1;
+    let mut runs = head.runs.clone();
+    runs.extend(tail.runs.iter().map(|run| TextRun {
+        start: run.start + offset,
+        end: run.end + offset,
+        style: run.style.clone(),
+    }));
+    let timed = head.karaoke.is_some() || tail.karaoke.is_some();
+    let mut words = word_times(head, first.1, first.2);
+    words.extend(
+        word_times(tail, second.1, second.2)
+            .into_iter()
+            .map(|word| WordTime {
+                at: word.at + shift,
+                until: word.until + shift,
+            }),
+    );
+    let look = head.karaoke.clone().or_else(|| tail.karaoke.clone());
+    let mut merged = TextStyle {
+        content: format!("{} {}", head.content.trim_end(), tail.content.trim_start()),
+        runs,
+        karaoke: look
+            .filter(|_| timed)
+            .map(|karaoke| Karaoke { words, ..karaoke }),
+        ..head.clone()
+    };
+    merged.tidy_runs();
+    merged.tidy_karaoke();
+    merged
 }
 
 /// `HH:MM:SS.mmm`, to the nearest millisecond; below zero is zero.
@@ -741,6 +867,261 @@ mod tests {
         assert!(!ends_sentence("3.5"));
         assert!(!ends_sentence("todos,"));
         assert!(ends_clause("todos,"));
+    }
+
+    fn timed_title(content: &str, words: &[(f64, f64)]) -> TextStyle {
+        TextStyle {
+            content: content.to_owned(),
+            karaoke: Some(Karaoke {
+                words: words
+                    .iter()
+                    .map(|&(at, until)| WordTime { at, until })
+                    .collect(),
+                ..Karaoke::default()
+            }),
+            ..TextStyle::default()
+        }
+    }
+
+    #[test]
+    fn a_caption_splits_into_the_words_before_and_after_the_cut() {
+        let mut title = timed_title(
+            "Hola a todos, bienvenidos",
+            &[(0.0, 0.3), (0.3, 0.4), (0.4, 0.8), (0.9, 1.5)],
+        );
+        // "todos," in red: the run goes with its word.
+        title.style_range(
+            7,
+            13,
+            &crate::model::RunStyle {
+                color: Some("#ff0000".to_owned()),
+                ..Default::default()
+            },
+        );
+        let (head, tail) = split_words(&title, 0.0, 1.5, 0.4).expect("two halves");
+        assert_eq!(head.content, "Hola a");
+        assert_eq!(tail.content, "todos, bienvenidos");
+        assert_eq!(head.karaoke.as_ref().unwrap().words.len(), 2);
+        // The tail's words keep their times: its clip's clock starts at
+        // the cut, and the times are on that same clock.
+        let words = &tail.karaoke.as_ref().unwrap().words;
+        assert_eq!((words[0].at, words[1].at), (0.4, 0.9));
+        assert!(head.runs.is_empty());
+        assert_eq!((tail.runs[0].start, tail.runs[0].end), (0, 6));
+
+        // A cut outside the words still leaves one on each side.
+        let (head, _) = split_words(&title, 0.0, 1.5, -5.0).expect("two halves");
+        assert_eq!(head.content, "Hola");
+        let (_, tail) = split_words(&title, 0.0, 1.5, 99.0).expect("two halves");
+        assert_eq!(tail.content, "bienvenidos");
+        assert!(split_words(&timed_title("Hola", &[(0.0, 0.3)]), 0.0, 1.0, 0.1).is_none());
+        assert_eq!(middle_cut(&title, 0.0, 1.5), Some(0.4));
+    }
+
+    #[test]
+    fn a_caption_with_no_times_splits_by_its_words_lengths() {
+        let title = TextStyle {
+            content: "uno dos tres cuatro".to_owned(),
+            ..TextStyle::default()
+        };
+        let cut = middle_cut(&title, 0.0, 4.0).expect("a middle");
+        let (head, tail) = split_words(&title, 0.0, 4.0, cut).expect("two halves");
+        assert_eq!(
+            (head.content.as_str(), tail.content.as_str()),
+            ("uno dos", "tres cuatro")
+        );
+        assert!(head.karaoke.is_none() && tail.karaoke.is_none());
+    }
+
+    #[test]
+    fn two_captions_merge_with_every_word_lit_when_it_was_said() {
+        let first = timed_title("Hola a", &[(0.0, 0.3), (0.3, 0.4)]);
+        let mut second = timed_title("todos, bienvenidos", &[(0.0, 0.4), (0.5, 1.1)]);
+        second.style_range(
+            0,
+            6,
+            &crate::model::RunStyle {
+                color: Some("#ff0000".to_owned()),
+                ..Default::default()
+            },
+        );
+        // The second clip starts 2 s after the first; both clocks at zero.
+        let merged = merge_words((&first, 0.0, 0.5), (&second, 0.0, 1.1), 2.0);
+        assert_eq!(merged.content, "Hola a todos, bienvenidos");
+        let words = &merged.karaoke.as_ref().unwrap().words;
+        assert_eq!(words.len(), 4);
+        assert_eq!((words[2].at, words[3].until), (2.0, 3.1));
+        assert_eq!((merged.runs[0].start, merged.runs[0].end), (7, 13));
+        // Cut where the second began, it comes apart as it was.
+        let (head, tail) = split_words(&merged, 0.0, 3.1, 2.0).expect("two halves");
+        assert_eq!(
+            (head.content.as_str(), tail.content.as_str()),
+            ("Hola a", "todos, bienvenidos")
+        );
+    }
+
+    /// The edits the transcript makes, on a real editor: a caption cut in
+    /// two leaves halves that each keep their own words and times, joined
+    /// again it is the caption it was, and one started earlier keeps
+    /// every word at the moment it was said.
+    #[test]
+    fn the_transcripts_edits_keep_every_word_at_its_moment() {
+        use crate::commands::{ClipMove, ClipPatch, TrimEdge};
+        use crate::{Command, Editor};
+
+        let retitle = |id: &str, style: TextStyle| Command::UpdateClip {
+            clip_id: id.to_owned(),
+            patch: ClipPatch {
+                text: Some(Some(style)),
+                ..ClipPatch::default()
+            },
+        };
+        // Each word's time on the timeline, whatever clip it is now on.
+        let said = |editor: &Editor| -> Vec<(String, f64)> {
+            let timeline = editor.project().active();
+            let lane = timeline.clips[0].track_id.clone();
+            title_captions(timeline, Some(&lane))
+                .into_iter()
+                .flat_map(|caption| {
+                    caption
+                        .text
+                        .split_whitespace()
+                        .map(str::to_owned)
+                        .zip(
+                            caption
+                                .words
+                                .iter()
+                                .map(|word| (word.at * 1000.0).round() / 1000.0),
+                        )
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+
+        let mut editor = Editor::new();
+        let title = timed_title(
+            "Hola a todos, bienvenidos",
+            &[(0.0, 0.3), (0.3, 0.4), (0.4, 0.8), (0.9, 1.5)],
+        );
+        let id = editor
+            .apply(Command::AddTextClip {
+                track_id: None,
+                above: true,
+                start: 10.0,
+                style: Some(title.clone()),
+                duration: Some(1.5),
+                offset_y: None,
+            })
+            .expect("adds")
+            .created_id
+            .expect("an id");
+        let whole = said(&editor);
+        assert_eq!(whole[2], ("todos,".to_owned(), 10.4));
+
+        // Cut where "todos," begins.
+        let (head, tail) = split_words(&title, 0.0, 1.5, 0.4).expect("two halves");
+        editor
+            .apply(Command::SplitClips {
+                clip_ids: vec![id.clone()],
+                time: 10.4,
+            })
+            .expect("splits");
+        let clips = editor.project().active().clips.clone();
+        assert_eq!(clips.len(), 2, "a title splits like any clip");
+        let made = clips.iter().find(|clip| clip.id != id).expect("the tail");
+        assert!(
+            (made.source_start - 0.4).abs() < 1e-9,
+            "the tail's clock starts at the cut"
+        );
+        let made = made.id.clone();
+        editor.apply(retitle(&id, head)).expect("retitles");
+        editor.apply(retitle(&made, tail)).expect("retitles");
+        assert_eq!(said(&editor), whole);
+
+        // Joined again.
+        let (first, second) = {
+            let timeline = editor.project().active();
+            (
+                timeline.clip(&id).expect("head").clone(),
+                timeline.clip(&made).expect("tail").clone(),
+            )
+        };
+        let merged = merge_words(
+            (
+                first.text.as_ref().unwrap(),
+                first.source_start,
+                first.duration,
+            ),
+            (
+                second.text.as_ref().unwrap(),
+                second.source_start,
+                second.duration,
+            ),
+            (second.start - second.source_start) - (first.start - first.source_start),
+        );
+        editor
+            .apply(Command::Batch {
+                commands: vec![
+                    Command::RemoveClips {
+                        clip_ids: vec![made],
+                        ripple: false,
+                    },
+                    Command::TrimClip {
+                        clip_id: id.clone(),
+                        edge: TrimEdge::End,
+                        delta: second.start + second.duration - (first.start + first.duration),
+                        ripple: false,
+                    },
+                    retitle(&id, merged),
+                ],
+            })
+            .expect("merges");
+        let clip = editor.project().active().clip(&id).expect("merged").clone();
+        assert_eq!(
+            clip.text.as_ref().unwrap().content,
+            "Hola a todos, bienvenidos"
+        );
+        assert!((clip.duration - 1.5).abs() < 1e-9);
+        assert_eq!(said(&editor), whole);
+
+        // Started a quarter of a second earlier: moved, made longer, and
+        // its words' times moved along.
+        let mut moved = clip.text.clone().unwrap();
+        moved.karaoke = moved.karaoke.map(|karaoke| karaoke.shifted(0.25));
+        editor
+            .apply(Command::Batch {
+                commands: vec![
+                    Command::MoveClips {
+                        moves: vec![ClipMove {
+                            clip_id: id.clone(),
+                            start: 9.75,
+                            track_id: clip.track_id.clone(),
+                        }],
+                    },
+                    Command::TrimClip {
+                        clip_id: id.clone(),
+                        edge: TrimEdge::End,
+                        delta: 0.25,
+                        ripple: false,
+                    },
+                    retitle(&id, moved),
+                ],
+            })
+            .expect("starts earlier");
+        let clip = editor.project().active().clip(&id).expect("moved");
+        assert!((clip.start - 9.75).abs() < 1e-9 && (clip.duration - 1.75).abs() < 1e-9);
+        assert_eq!(said(&editor), whole);
+
+        // Started later by a trim: the in-point moves, the times do not.
+        editor
+            .apply(Command::TrimClip {
+                clip_id: id.clone(),
+                edge: TrimEdge::Start,
+                delta: 0.1,
+                ripple: false,
+            })
+            .expect("trims");
+        assert_eq!(said(&editor), whole);
     }
 
     #[test]

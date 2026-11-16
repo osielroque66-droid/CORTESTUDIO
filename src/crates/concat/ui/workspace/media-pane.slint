@@ -1767,6 +1767,7 @@ export component MediaPane inherits Rectangle {
     callback captions-size-changed(index: int);
     callback captions-choice-changed(which: int, index: int);
     callback captions-apply-highlight();
+    callback captions-row-action(action: int, index: int, text: string);
     callback captions-begin();
     callback captions-cancel();
     callback captions-import-srt();
@@ -2669,6 +2670,7 @@ export component MediaPane inherits Rectangle {
                         size-changed(index) => { root.captions-size-changed(index); }
                         choice-changed(which, index) => { root.captions-choice-changed(which, index); }
                         apply-highlight => { root.captions-apply-highlight(); }
+                        row-action(action, index, text) => { root.captions-row-action(action, index, text); }
                         begin => { root.captions-begin(); }
                         cancel => { root.captions-cancel(); }
                         import-srt => { root.captions-import-srt(); }

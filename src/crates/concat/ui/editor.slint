@@ -446,6 +446,7 @@ export global Editor {
     callback captions-size-changed(index: int);
     callback captions-choice-changed(which: int, index: int);
     callback captions-apply-highlight();
+    callback captions-row-action(action: int, index: int, text: string);
     callback captions-begin();
     callback captions-cancel();
     callback captions-import-srt();

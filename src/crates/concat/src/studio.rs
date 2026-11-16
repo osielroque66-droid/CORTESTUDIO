@@ -990,7 +990,7 @@ same_with_models! {
     same_settings: crate::ui::SettingsData => shortcuts;
     same_relink: crate::ui::RelinkData => items;
     same_start: crate::ui::StartData => rate_options;
-    same_captions: crate::ui::CaptionsSheetData => sources;
+    same_captions: crate::ui::CaptionsSheetData => sources, rows;
 }
 
 /// Writes `next` through `set` unless it is `same` as what `held` shows: a

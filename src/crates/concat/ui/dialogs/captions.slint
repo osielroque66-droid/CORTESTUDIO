@@ -6,6 +6,7 @@ import { I18n } from "../i18n.slint";
 import { Theme } from "../theme/theme.slint";
 import { Glyph, Icon } from "../icons.slint";
 import { Button, CopyChip, DialogRow, DialogSection, Modal, Progress } from "../primitives/modal.slint";
+import { IconButton } from "../primitives/panel.slint";
 import { SegmentedControl } from "../primitives/segmented-control.slint";
 import { Select } from "../primitives/select.slint";
 import { StylePicker, TextPresetData } from "../inspector/style-picker.slint";
@@ -47,7 +48,21 @@ export global CaptionStyles {
 // and the page shows it when it is back. On a phone, and in a window too
 // narrow for the library beside the work, it is a sheet.
 
+/// One caption of the transcript.
+export struct CaptionRowData {
+    /// Where it shows, as minutes, seconds and tenths.
+    time: string,
+    /// Where it goes.
+    until: string,
+    /// Its words.
+    text: string,
+    /// The playhead is on it.
+    current: bool,
+}
+
 export struct CaptionsSheetData {
+    /// The transcript: the captions' lane's titles in the order they play.
+    rows: [CaptionRowData],
     open: bool,
     /// "Use Sample Voice": the words come from a clip's sound.
     from-voice: bool,
@@ -118,6 +133,11 @@ export component CaptionsForm inherits VerticalLayout {
     callback choice-changed(which: int, index: int);
     /// Give the captions already on the timeline the lit word chosen here.
     callback apply-highlight();
+    /// Something done to row `index` of the transcript: 0 jump to it,
+    /// 1 its words corrected to `text`, 2 join it with the next, 3 cut it
+    /// in two, 4 delete it, 5 and 6 its start earlier and later, 7 and 8
+    /// its end.
+    callback row-action(action: int, index: int, text: string);
     callback begin();
     callback cancel();
     callback import-srt();
@@ -357,6 +377,123 @@ export component CaptionsForm inherits VerticalLayout {
             }
         }
 
+        // The transcript: every caption on the captions' lane, to read,
+        // jump to, correct, cut, join and time.
+        if !root.data.running && root.data.rows.length > 0: DialogSection {
+            title: I18n.t("captions.transcript");
+
+            Text {
+                text: I18n.t("captions.transcriptHelp");
+                color: Theme.fg-dim;
+                font-size: Theme.fs-sm;
+                wrap: word-wrap;
+            }
+
+            for row[index] in root.data.rows: Rectangle {
+                border-radius: Theme.r;
+                background: row.current ? Theme.accent.with-alpha(0.14) : transparent;
+                border-width: 1px;
+                border-color: row.current ? Theme.accent : Theme.line;
+
+                VerticalLayout {
+                    padding: 6px;
+                    spacing: 4px;
+
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        // The time is the way to the caption.
+                        Rectangle {
+                            width: 56px;
+                            Text {
+                                text: row.time;
+                                color: row.current ? Theme.accent : Theme.fg-muted;
+                                font-family: Theme.font-technical;
+                                font-size: Theme.fs-sm;
+                                vertical-alignment: center;
+                            }
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.row-action(0, index, ""); }
+                            }
+                        }
+
+                        words := TextInput {
+                            horizontal-stretch: 1;
+                            text: row.text;
+                            color: Theme.fg;
+                            font-size: Theme.fs;
+                            single-line: true;
+                            selection-background-color: Theme.accent;
+                            selection-foreground-color: Theme.on-accent;
+                            accepted => {
+                                root.row-action(1, index, self.text);
+                                self.clear-focus();
+                            }
+                            changed has-focus => {
+                                if (self.has-focus) {
+                                    root.row-action(0, index, "");
+                                } else {
+                                    root.row-action(1, index, self.text);
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 2px;
+                        alignment: start;
+
+                        IconButton {
+                            text: "−";
+                            label: I18n.t("captions.startEarlier");
+                            clicked => { root.row-action(5, index, ""); }
+                        }
+                        IconButton {
+                            text: "+";
+                            label: I18n.t("captions.startLater");
+                            clicked => { root.row-action(6, index, ""); }
+                        }
+                        Text {
+                            text: row.time + " → " + row.until;
+                            color: Theme.fg-dim;
+                            font-family: Theme.font-technical;
+                            font-size: Theme.fs-sm;
+                            vertical-alignment: center;
+                        }
+                        IconButton {
+                            text: "−";
+                            label: I18n.t("captions.endEarlier");
+                            clicked => { root.row-action(7, index, ""); }
+                        }
+                        IconButton {
+                            text: "+";
+                            label: I18n.t("captions.endLater");
+                            clicked => { root.row-action(8, index, ""); }
+                        }
+                        Rectangle { width: 8px; }
+                        IconButton {
+                            glyph: Glyph.split;
+                            label: I18n.t("captions.splitCaption");
+                            clicked => { root.row-action(3, index, ""); }
+                        }
+                        IconButton {
+                            glyph: Glyph.merge;
+                            label: I18n.t("captions.mergeWithNext");
+                            enabled: index + 1 < root.data.rows.length;
+                            clicked => { root.row-action(2, index, ""); }
+                        }
+                        IconButton {
+                            glyph: Glyph.trash;
+                            label: I18n.t("captions.deleteCaption");
+                            danger: true;
+                            clicked => { root.row-action(4, index, ""); }
+                        }
+                    }
+                }
+            }
+        }
+
         Rectangle {
             height: 1px;
             background: Theme.line;
@@ -506,6 +643,7 @@ export component CaptionsDialog inherits Modal {
     callback size-changed(index: int);
     callback choice-changed(which: int, index: int);
     callback apply-highlight();
+    callback row-action(action: int, index: int, text: string);
     callback begin();
     callback cancel();
     callback import-srt();
@@ -530,6 +668,7 @@ export component CaptionsDialog inherits Modal {
         size-changed(index) => { root.size-changed(index); }
         choice-changed(which, index) => { root.choice-changed(which, index); }
         apply-highlight => { root.apply-highlight(); }
+        row-action(action, index, text) => { root.row-action(action, index, text); }
         begin => { root.begin(); }
         cancel => { root.cancel(); }
         import-srt => { root.import-srt(); }

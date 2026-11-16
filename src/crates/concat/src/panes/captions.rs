@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use concat_project::Command;
 use concat_project::captions::{self, AssLook, Caption, Grouping, Spoken, SpokenWord};
-use concat_project::commands::ClipPatch;
+use concat_project::commands::{ClipMove, ClipPatch, TrimEdge};
 use concat_project::karaoke::{self, Karaoke, KaraokeMode, WordTime};
 use concat_project::model::{ClipKind, RunStyle, TextStyle};
 use concat_project::srt;
@@ -75,6 +75,21 @@ const CHOICE_HIGHLIGHT: i32 = 1;
 const CHOICE_COLOUR: i32 = 2;
 const CHOICE_FORMAT: i32 = 3;
 
+/// What can be done to a row of the transcript; see
+/// [`CaptionsMsg::RowAction`].
+const ROW_JUMP: i32 = 0;
+const ROW_EDIT: i32 = 1;
+const ROW_MERGE: i32 = 2;
+const ROW_SPLIT: i32 = 3;
+const ROW_DELETE: i32 = 4;
+const ROW_START_EARLIER: i32 = 5;
+const ROW_START_LATER: i32 = 6;
+const ROW_END_EARLIER: i32 = 7;
+const ROW_END_LATER: i32 = 8;
+/// How far one press moves a caption's edge: a twentieth of a second,
+/// fine enough to land on a word and coarse enough to get there.
+const NUDGE: f64 = 0.05;
+
 /// Everything that can happen to the captions sheet.
 #[derive(Clone, Debug)]
 pub enum CaptionsMsg {
@@ -106,6 +121,9 @@ pub enum CaptionsMsg {
     /// Gives the captions already on the timeline the sheet's way of
     /// lighting the word being said.
     ApplyHighlight,
+    /// Something done to a row of the transcript: what (see the `ROW_`
+    /// constants), the row, and for a correction the row's new words.
+    RowAction(i32, i32, String),
     /// Run the pass the sheet describes.
     Begin,
     Cancel,
@@ -272,6 +290,9 @@ impl CaptionsPane {
                 studio.prefs.save(&studio.host.dirs);
             }
             CaptionsMsg::ApplyHighlight => self.apply_highlight(studio),
+            CaptionsMsg::RowAction(action, index, text) => {
+                self.row_action(studio, action, index, text);
+            }
             CaptionsMsg::Begin => {
                 if self.from_voice {
                     self.run_sound(studio);
@@ -380,6 +401,206 @@ impl CaptionsPane {
             CaptionsMsg::ImportSrtFrom(path) => self.import_srt(studio, &path),
             CaptionsMsg::ExportSrt => self.ask_export_srt(studio),
             CaptionsMsg::ExportSrtTo(path) => self.export_srt(studio, &path),
+        }
+    }
+
+    /// One thing done to a row of the transcript. The rows are the
+    /// captions' lane's titles in the order they play, so the row is
+    /// looked up afresh: the timeline may have changed under the list.
+    fn row_action(&mut self, studio: &mut Studio, action: i32, index: i32, text: String) {
+        let rows = transcript(studio);
+        let Some(row) = usize::try_from(index)
+            .ok()
+            .and_then(|index| rows.get(index))
+        else {
+            return;
+        };
+        let Some(clip) = studio.clip(&row.id).cloned() else {
+            return;
+        };
+        let Some(style) = clip.text.clone() else {
+            return;
+        };
+        let next = rows
+            .get(index as usize + 1)
+            .and_then(|next| studio.clip(&next.id).cloned());
+        let before_end = index
+            .checked_sub(1)
+            .and_then(|at| rows.get(at as usize))
+            .map_or(0.0, |before| before.end);
+        self.message.clear();
+        match action {
+            ROW_JUMP => {
+                studio.selection = vec![clip.id.clone()];
+                // A hair inside, so the frame shown is the caption's own
+                // and not the last of the one before it.
+                studio.seek((clip.start + 0.001) as f32);
+            }
+            ROW_EDIT => {
+                let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if words.is_empty() || words == style.content {
+                    return;
+                }
+                let mut edited = style;
+                edited.set_content(words, None);
+                studio.apply(retitle(&clip.id, edited));
+            }
+            ROW_DELETE => {
+                studio.apply(Command::RemoveClips {
+                    clip_ids: vec![clip.id],
+                    ripple: false,
+                });
+            }
+            ROW_MERGE => {
+                let Some((next, tail)) =
+                    next.and_then(|next| next.text.clone().map(|text| (next, text)))
+                else {
+                    return;
+                };
+                let shift = (next.start - next.source_start) - (clip.start - clip.source_start);
+                let merged = captions::merge_words(
+                    (&style, clip.source_start, clip.duration),
+                    (&tail, next.source_start, next.duration),
+                    shift,
+                );
+                let grow = next.start + next.duration - (clip.start + clip.duration);
+                studio.apply(Command::Batch {
+                    commands: vec![
+                        Command::RemoveClips {
+                            clip_ids: vec![next.id],
+                            ripple: false,
+                        },
+                        Command::TrimClip {
+                            clip_id: clip.id.clone(),
+                            edge: TrimEdge::End,
+                            delta: grow,
+                            ripple: false,
+                        },
+                        retitle(&clip.id, merged),
+                    ],
+                });
+            }
+            ROW_SPLIT => {
+                // At the playhead when it is on the caption, and otherwise
+                // where the middle word begins.
+                let playhead = f64::from(studio.playhead);
+                let inside =
+                    playhead > clip.start + 0.02 && playhead < clip.start + clip.duration - 0.02;
+                let cut = if inside {
+                    Some(clip.source_start + playhead - clip.start)
+                } else {
+                    captions::middle_cut(&style, clip.source_start, clip.duration)
+                };
+                let halves = cut.and_then(|cut| {
+                    captions::split_words(&style, clip.source_start, clip.duration, cut)
+                        .map(|halves| (cut, halves))
+                });
+                let Some((cut, (head, tail))) = halves else {
+                    studio.notify(&t("captions.oneWordCannotSplit"), true);
+                    return;
+                };
+                let time = (clip.start + cut - clip.source_start)
+                    .clamp(clip.start + 0.02, clip.start + clip.duration - 0.02);
+                let (lane, head_id) = (clip.track_id.clone(), clip.id.clone());
+                studio.apply_as_one(
+                    "split caption",
+                    Command::SplitClips {
+                        clip_ids: vec![clip.id.clone()],
+                        time,
+                    },
+                    move |studio, _| {
+                        // The tail is the title the cut left starting
+                        // there, on the same lane.
+                        let made = studio
+                            .timeline()
+                            .clips
+                            .iter()
+                            .find(|held| {
+                                held.kind == ClipKind::Text
+                                    && held.track_id == lane
+                                    && held.id != head_id
+                                    && (held.start - time).abs() < 1e-3
+                            })
+                            .map(|held| held.id.clone());
+                        match made {
+                            Some(tail_id) => {
+                                vec![retitle(&head_id, head), retitle(&tail_id, tail)]
+                            }
+                            // Not cut after all: the caption stays whole.
+                            None => Vec::new(),
+                        }
+                    },
+                );
+            }
+            ROW_START_EARLIER | ROW_START_LATER => {
+                let wanted = if action == ROW_START_EARLIER {
+                    -NUDGE
+                } else {
+                    NUDGE
+                };
+                // Not into the caption before, nor past its own end.
+                let delta = wanted
+                    .max(before_end - clip.start)
+                    .min(clip.duration - SHORTEST_CAPTION);
+                if delta.abs() < 1e-6 {
+                    return;
+                }
+                if delta > 0.0 || clip.source_start + delta >= 0.0 {
+                    // The in-point moves with the edge, so the words keep
+                    // their moments.
+                    studio.apply(Command::TrimClip {
+                        clip_id: clip.id,
+                        edge: TrimEdge::Start,
+                        delta,
+                        ripple: false,
+                    });
+                } else {
+                    // A title has nothing before its first moment to trim
+                    // back into: it is moved earlier and made as much
+                    // longer, and its words' times moved along, so each
+                    // is still said when it was.
+                    let mut moved = style;
+                    moved.karaoke = moved.karaoke.map(|karaoke| karaoke.shifted(-delta));
+                    studio.apply(Command::Batch {
+                        commands: vec![
+                            Command::MoveClips {
+                                moves: vec![ClipMove {
+                                    clip_id: clip.id.clone(),
+                                    start: clip.start + delta,
+                                    track_id: clip.track_id.clone(),
+                                }],
+                            },
+                            Command::TrimClip {
+                                clip_id: clip.id.clone(),
+                                edge: TrimEdge::End,
+                                delta: -delta,
+                                ripple: false,
+                            },
+                            retitle(&clip.id, moved),
+                        ],
+                    });
+                }
+            }
+            ROW_END_EARLIER | ROW_END_LATER => {
+                let wanted = if action == ROW_END_EARLIER {
+                    -NUDGE
+                } else {
+                    NUDGE
+                };
+                let end = clip.start + clip.duration;
+                let room = next.map_or(f64::INFINITY, |next| next.start - end);
+                let delta = wanted.min(room).max(SHORTEST_CAPTION - clip.duration);
+                if delta.abs() < 1e-6 {
+                    return;
+                }
+                studio.apply(Command::TrimClip {
+                    clip_id: clip.id,
+                    edge: TrimEdge::End,
+                    delta,
+                    ripple: false,
+                });
+            }
+            _ => {}
         }
     }
 
@@ -840,7 +1061,23 @@ impl CaptionsPane {
             .map(|source| source.label.into())
             .collect();
         let english_only = self.english_only(studio);
+        // The transcript, only while there is a panel to show it in.
+        let playhead = f64::from(studio.playhead);
+        let rows: Vec<crate::ui::CaptionRowData> = if self.open || self.shown {
+            transcript(studio)
+                .into_iter()
+                .map(|row| crate::ui::CaptionRowData {
+                    time: row_time(row.start).into(),
+                    until: row_time(row.end).into(),
+                    current: playhead >= row.start && playhead < row.end,
+                    text: row.text.into(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         CaptionsSheetData {
+            rows: std::rc::Rc::new(slint::VecModel::from(rows)).into(),
             open: self.open,
             from_voice: self.from_voice,
             sources: std::rc::Rc::new(slint::VecModel::from(labels)).into(),
@@ -931,6 +1168,56 @@ fn srt_commands(
             )
         })
         .collect()
+}
+
+/// A title given new words, times or look, whole.
+fn retitle(clip_id: &str, style: TextStyle) -> Command {
+    Command::UpdateClip {
+        clip_id: clip_id.to_owned(),
+        patch: ClipPatch {
+            text: Some(Some(style)),
+            ..ClipPatch::default()
+        },
+    }
+}
+
+/// One row of the transcript: a caption on the captions' lane.
+struct Row {
+    id: String,
+    start: f64,
+    end: f64,
+    text: String,
+}
+
+/// The transcript: the captions' lane's titles in the order they play.
+/// The lane is the selected title's, or the one with the most titles
+/// (see [`export_lane`]); empty when the timeline has no title.
+fn transcript(studio: &Studio) -> Vec<Row> {
+    let Some(lane) = export_lane(studio) else {
+        return Vec::new();
+    };
+    let mut rows: Vec<Row> = studio
+        .timeline()
+        .clips
+        .iter()
+        .filter(|clip| clip.kind == ClipKind::Text && clip.track_id == lane.track_id)
+        .filter_map(|clip| {
+            Some(Row {
+                id: clip.id.clone(),
+                start: clip.start,
+                end: clip.start + clip.duration,
+                text: clip.text.as_ref()?.content.clone(),
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| a.start.total_cmp(&b.start));
+    rows
+}
+
+/// Seconds as a row shows them: minutes, seconds and tenths.
+fn row_time(seconds: f64) -> String {
+    let tenths = (seconds.max(0.0) * 10.0).round() as u64;
+    format!("{}:{:02}.{}", tenths / 600, tenths / 10 % 60, tenths % 10)
 }
 
 /// The look the word being said takes, by what the sheet remembers: how

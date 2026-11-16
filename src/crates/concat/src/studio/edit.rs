@@ -402,6 +402,34 @@ impl Studio {
         }
     }
 
+    /// Several edits as one undo step, where the later ones depend on
+    /// what the first made: `first` is applied, `then` reads the project
+    /// as it now is - with the id `first` minted, when it minted one - and
+    /// says what else to do. Splitting a caption is this: the clip is cut,
+    /// and each half, the new one included, is then given its own words.
+    pub fn apply_as_one(
+        &mut self,
+        name: &str,
+        first: Command,
+        then: impl FnOnce(&Studio, Option<&str>) -> Vec<Command>,
+    ) {
+        self.end_burst();
+        self.flush_commit();
+        self.last_commit = None;
+        // Whatever gesture was open is over: these fold into each other
+        // and into nothing before them.
+        if let Some(session) = self.session.as_mut() {
+            session.end_gesture();
+        }
+        let made = self.apply_within(name, first);
+        for command in then(self, made.as_deref()) {
+            self.apply_within(name, command);
+        }
+        if let Some(session) = self.session.as_mut() {
+            session.end_gesture();
+        }
+    }
+
     /// [`Studio::apply`] as one move of an inspector gesture: the same
     /// bookkeeping, but the editor folds it into the gesture's undo step
     /// and the coalescing window stays open for the next move.
